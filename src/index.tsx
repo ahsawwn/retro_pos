@@ -57,26 +57,34 @@ import {
 import {
   ACTIONS,
   DEFAULT_BINDINGS,
+  PRINT_MODES,
   actionForKey,
   actionForKeyExcluding,
   bindingLabel,
   isReservedBinding,
   loadKeybindings,
+  loadReceiptPrintMode,
+  loadReceiptPrinterDevice,
   loadStoreProfile,
   loadThemeKey,
   normalizeBindingKey,
   resetKeybindings,
   saveKeybindings,
+  saveReceiptPrintMode,
+  saveReceiptPrinterDevice,
   saveThemeKey,
   updateStoreProfile,
   type ActionName,
   type Keybindings,
+  type ReceiptPrintMode,
 } from "./settings";
 import { cycleTheme, getTheme, setTheme, type Theme } from "./themes/themes";
 import {
   appendReceiptToLog,
+  detectPrinterDevice,
   generateEscPosReceipt,
   generateReceiptText,
+  printReceipt,
   receiptLines,
   type ReceiptData,
   type ReceiptItem,
@@ -91,7 +99,14 @@ type View = "POS" | "INVENTORY" | "HISTORY" | "ANALYTICS" | "SETTINGS";
 type Focus = "SEARCH" | "CATALOG" | "CART" | "INVENTORY" | "HISTORY" | "ANALYTICS" | "SETTINGS";
 type StatusKind = "info" | "success" | "warning" | "danger";
 type InventoryMode = "products" | "ingredients";
-type SettingsSection = "menu" | "store" | "shortcuts" | "users" | "data";
+type SettingsSection = "menu" | "store" | "printer" | "shortcuts" | "users" | "data";
+
+interface PrinterForm {
+  field: 0 | 1;
+  mode: ReceiptPrintMode;
+  device: string;
+  message: string;
+}
 
 interface ProductForm {
   mode: "new" | "edit";
@@ -183,6 +198,7 @@ const ONBOARDING_STEPS = 9;
 const POS_FOCUS_ORDER: Focus[] = ["SEARCH", "CATALOG", "CART"];
 const SETTINGS_MENU = [
   { title: "Store profile", detail: "Name, address, type, currency, tax" },
+  { title: "Receipt printer", detail: "Auto print, ask, device, test" },
   { title: "Keyboard shortcuts", detail: "Remap global and POS keys" },
   { title: "User accounts", detail: "Admins, managers, and cashiers" },
   { title: "Import / export", detail: "Bulk product CSV or JSON" },
@@ -200,6 +216,8 @@ let storeConfig: StoreConfig | null = loadStoreProfile();
 let currentUser: Session | null = null;
 let activeTheme: Theme = getTheme();
 let bindings: Keybindings = loadKeybindings();
+let receiptPrintMode: ReceiptPrintMode = loadReceiptPrintMode();
+let printerDevice = loadReceiptPrinterDevice();
 let currencySymbol = storeConfig?.currency ?? "$";
 let taxRate = storeConfig?.tax_rate ?? 0;
 
@@ -249,6 +267,7 @@ let onboarding: OnboardingState = {
 let settingsSection: SettingsSection = "menu";
 let settingsMenuIndex = 0;
 let storeForm: StoreForm | null = null;
+let printerForm: PrinterForm | null = null;
 let shortcutIndex = 0;
 let shortcutCapture: ActionName | null = null;
 let userIndex = 0;
@@ -382,7 +401,8 @@ function cycleFocus(direction: 1 | -1): void {
 
 function setFocus(next: Focus): void {
   focus = next;
-  inputMode = next === "SEARCH" || productForm !== null || ingredientForm !== null || storeForm !== null || userForm !== null;
+  inputMode =
+    next === "SEARCH" || productForm !== null || ingredientForm !== null || storeForm !== null || userForm !== null;
 }
 
 function viewLabel(): string {
@@ -415,6 +435,7 @@ function switchView(view: View): void {
   ingredientForm = null;
   recipeEditor = null;
   storeForm = null;
+  printerForm = null;
   userForm = null;
   shortcutCapture = null;
   dataImportMode = false;
@@ -676,6 +697,16 @@ function completeSale(methodIndex: number, tenderedText: string): void {
     appendReceiptToLog(generateEscPosReceipt(receipt), "receipts.escpos.log");
   } catch (error) {
     note = `Sale saved, but receipt logging failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  if (receiptPrintMode === "auto") {
+    const printed = printReceipt(receipt, printerDevice);
+    note = printed.ok
+      ? `Printed to ${printed.device} · plain and ESC/POS logs updated.`
+      : `${printed.error} Receipt kept on screen; ESC/POS saved to receipts.escpos.log.`;
+    if (!printed.ok) setStatus(`Receipt not printed — ${printed.error}`, "warning");
+  } else if (receiptPrintMode === "ask") {
+    note = "Press P to print · Esc closes (printing is off by default).";
   }
 
   console.log(receipt);
@@ -1228,11 +1259,24 @@ function openSettingsSection(): void {
     inputMode = true;
     setStatus("Store profile — Tab moves fields, Ctrl+S saves.");
   } else if (settingsMenuIndex === 1) {
+    const detected = detectPrinterDevice(printerDevice);
+    printerForm = {
+      field: 0,
+      mode: receiptPrintMode,
+      device: printerDevice,
+      message: detected.device
+        ? `Detected printer: ${detected.device}. T sends a test receipt.`
+        : `${detected.error} T sends a test receipt.`,
+    };
+    settingsSection = "printer";
+    inputMode = false;
+    setStatus("Receipt printer — ←/→ print mode, D edit device, T test print.");
+  } else if (settingsMenuIndex === 2) {
     settingsSection = "shortcuts";
     shortcutIndex = 0;
     inputMode = false;
     setStatus("Shortcuts — Enter remaps, Backspace restores one, R restores all.");
-  } else if (settingsMenuIndex === 2) {
+  } else if (settingsMenuIndex === 3) {
     if (!isAdmin(currentUser.role)) {
       setStatus("Only an Admin can manage user accounts.", "warning");
       updateUI();
@@ -1243,7 +1287,7 @@ function openSettingsSection(): void {
     userIndex = 0;
     inputMode = false;
     setStatus("User accounts — A adds, P resets a PIN, Del removes.");
-  } else if (settingsMenuIndex === 3) {
+  } else if (settingsMenuIndex === 4) {
     settingsSection = "data";
     dataImportMode = false;
     dataMessage = `Export writes products_export.csv · ${products.length} products loaded.`;
@@ -1259,6 +1303,7 @@ function openSettingsSection(): void {
 function backToSettingsMenu(): void {
   settingsSection = "menu";
   storeForm = null;
+  printerForm = null;
   userForm = null;
   shortcutCapture = null;
   dataImportMode = false;
@@ -1291,6 +1336,133 @@ function saveStoreForm(): void {
     setStatus(error instanceof Error ? error.message : String(error), "danger");
   }
   updateUI();
+}
+
+function savePrinterSettings(): void {
+  if (!printerForm) return;
+  receiptPrintMode = printerForm.mode;
+  saveReceiptPrintMode(receiptPrintMode);
+  saveReceiptPrinterDevice(printerForm.device);
+  printerDevice = loadReceiptPrinterDevice();
+  printerForm.field = 0;
+  const detected = detectPrinterDevice(printerDevice);
+  printerForm.message = detected.device
+    ? `Saved. Detected printer: ${detected.device}. T sends a test receipt.`
+    : `Saved. ${detected.error}`;
+  setStatus(`Receipt printer saved — mode ${receiptPrintMode}.`, "success");
+  updateUI();
+}
+
+function testPrintReceipt(): void {
+  if (!printerForm) return;
+  saveReceiptPrinterDevice(printerForm.device);
+  printerDevice = loadReceiptPrinterDevice();
+
+  const subtotal = 9;
+  const discount = 0;
+  const tax = round2(subtotal * (taxRate / 100));
+  const total = round2(subtotal + tax);
+  const sample = receiptForValues(
+    0,
+    [
+      { name: "Test Espresso", price: 3.5, qty: 1 },
+      { name: "Test Croissant", price: 2.75, qty: 2 },
+    ],
+    subtotal,
+    discount,
+    0,
+    tax,
+    total,
+    "Cash",
+    total,
+    0,
+    currentUser?.username ?? "printer-test",
+    new Date()
+  );
+
+  const printed = printReceipt(sample, printerForm.device);
+  if (printed.ok) {
+    printerForm.message = `Test receipt sent to ${printed.device}.`;
+    setStatus(`Test receipt sent to ${printed.device}.`, "success");
+  } else {
+    printerForm.message = printed.error ?? "Test print failed.";
+    setStatus(`Test print failed — ${printed.error}`, "warning");
+  }
+  updateUI();
+}
+
+function handlePrinterFormKey(key: KeyEvent): void {
+  const form = printerForm;
+  if (!form) return;
+
+  if (form.field === 1) {
+    if (key.name === "escape") {
+      form.field = 0;
+      updateUI();
+      return;
+    }
+    if (key.name === "return") {
+      savePrinterSettings();
+      return;
+    }
+    if (key.name === "backspace") {
+      form.device = form.device.slice(0, -1);
+      updateUI();
+      return;
+    }
+    if (key.ctrl && key.name === "u") {
+      form.device = "";
+      updateUI();
+      return;
+    }
+    if (isPrintable(key) && form.device.length < 120) {
+      form.device += key.sequence;
+      updateUI();
+    }
+    return;
+  }
+
+  if (key.name === "escape") {
+    backToSettingsMenu();
+    return;
+  }
+  if (key.name === "tab" || key.name === "down" || key.name === "up") {
+    form.field = form.field === 0 ? 1 : 0;
+    updateUI();
+    return;
+  }
+  if (key.name === "left" || key.name === "right" || key.name === "space") {
+    const index = PRINT_MODES.findIndex((entry) => entry.mode === form.mode);
+    const delta = key.name === "left" ? -1 : 1;
+    form.mode = PRINT_MODES[(index + delta + PRINT_MODES.length) % PRINT_MODES.length]!.mode;
+    form.message = PRINT_MODES.find((entry) => entry.mode === form.mode)!.description;
+    updateUI();
+    return;
+  }
+  if (key.name === "1" || key.name === "2" || key.name === "3") {
+    const index = Number.parseInt(key.name, 10) - 1;
+    const chosen = PRINT_MODES[index];
+    if (chosen) {
+      form.mode = chosen.mode;
+      form.message = chosen.description;
+      updateUI();
+    }
+    return;
+  }
+  if (key.name === "d") {
+    form.field = 1;
+    form.device = printerDevice;
+    form.message = "Type the device path (for example /dev/usb/lp0), then Enter.";
+    updateUI();
+    return;
+  }
+  if (key.name === "t") {
+    testPrintReceipt();
+    return;
+  }
+  if (key.name === "return") {
+    savePrinterSettings();
+  }
 }
 
 function startNewUser(): void {
@@ -2206,6 +2378,8 @@ function renderSettingsDetail(width: number, rows: number): string[] {
       clip(` Currency    ${currencySymbol}`, width),
       clip(` Tax rate    ${percent(taxRate)}`, width),
       clip(` Theme       ${activeTheme.name}`, width),
+      clip(` Receipts    ${PRINT_MODES.find((entry) => entry.mode === receiptPrintMode)?.label ?? receiptPrintMode}`, width),
+      clip(` Printer     ${printerDevice || "auto-detect"}`, width),
       "",
       clip(` Signed in   ${currentUser?.username ?? "—"} (${currentUser?.role ?? "—"})`, width),
       clip(` Theme saved across restarts.`, width),
@@ -2233,6 +2407,30 @@ function renderSettingsDetail(width: number, rows: number): string[] {
     lines.push(clip(" Type: ←/→ or 1/2 toggle", width));
     lines.push(clip(" Ctrl+S save · Esc cancel", width));
     lines.push(clip(" Changing type changes stock rules.", width));
+    return lines.slice(0, Math.max(1, rows));
+  }
+
+  if (settingsSection === "printer") {
+    if (!printerForm) return [clip(" No printer settings loaded.", width)];
+    const form = printerForm;
+    const detected = detectPrinterDevice(form.device);
+    const lines: string[] = [clip(" RECEIPT PRINTER", width), clip("─".repeat(width), width)];
+    PRINT_MODES.forEach((entry, index) => {
+      const marker = entry.mode === form.mode ? "▸" : " ";
+      lines.push(clip(`${marker} ${index + 1}. ${padColumn(entry.label, 18)} ${entry.description}`, width));
+    });
+    lines.push("");
+    const deviceCursor = form.field === 1 ? "▌" : "";
+    const deviceValue = form.field === 1 ? form.device : printerDevice;
+    lines.push(clip(`${form.field === 1 ? "▸" : " "} Device   ${deviceValue || "(auto-detect)"}${deviceCursor}`, width));
+    lines.push(clip(`  Status   ${detected.device ?? detected.error ?? "auto-detect on print"}`, width));
+    lines.push("");
+    if (form.field === 1) lines.push(clip(" TYPE device path · Enter save · Ctrl+U clear · Esc back", width));
+    else lines.push(clip(" ←/→ or 1/2/3 mode · D device · T test print · Enter save · Esc", width));
+    if (form.message) {
+      lines.push("");
+      for (const row of wrapText(form.message, Math.max(10, width))) lines.push(clip(row, width));
+    }
     return lines.slice(0, Math.max(1, rows));
   }
 
@@ -2335,6 +2533,8 @@ function keysHint(): string {
     if (userForm) return " TYPE · Tab next · Ctrl+S save · Esc cancel ";
     if (storeForm) return " Tab field · ←/→ type · Ctrl+S save · Esc cancel ";
     if (settingsSection === "shortcuts") return " ↑↓ action · Enter remap · Backspace default · R all · Esc ";
+    if (settingsSection === "printer" && printerForm?.field === 1) return " TYPE device · Enter save · Ctrl+U clear · Esc ";
+    if (settingsSection === "printer") return " ←/→ mode · D device · T test · Enter save · Esc ";
     if (settingsSection === "users") return " ↑↓ user · A add · P PIN · Del remove · Esc back ";
     if (settingsSection === "data") return " E export · I import · Esc back ";
     return " ↑↓ section · Enter open · Esc POS · F1 POS · F5 theme ";
@@ -2400,7 +2600,8 @@ function helpLines(): string[] {
     "  F3    Revenue, transactions, payment mix, top sellers",
     "",
     "SETTINGS (Manager / Admin)",
-    "  F4    Store profile, shortcuts, users, import/export",
+    "  F4    Store profile, printer, shortcuts, users, import/export",
+    "  P     Print the open receipt",
     "  Remapped printable shortcuts work in nav mode.",
     "",
     "Receipts append to receipts.log and receipts.escpos.log (42 columns).",
@@ -2611,8 +2812,9 @@ function renderModal(): void {
     );
   } else {
     modalBox.title = ` ${modal.title} `;
+    const printHint = modal.kind === "receipt" && receiptPrintMode !== "off" ? " · [P] print" : "";
     modalHint.content = clip(
-      `${modal.note}${maxScroll > 0 ? " · ↑↓ scroll" : ""} · Esc/Enter close`,
+      `${modal.note}${printHint}${maxScroll > 0 ? " · ↑↓ scroll" : ""} · Esc/Enter close`,
       modalWidth - 4
     );
   }
@@ -2862,6 +3064,25 @@ function handleModalKey(key: KeyEvent): void {
       updateUI();
     }
     return;
+  }
+
+  if (modal?.kind === "receipt") {
+    if (key.name === "p") {
+      const printed = printReceipt(modal.receipt, printerDevice);
+      if (printed.ok) {
+        modal.note = `Printed to ${printed.device}.`;
+        setStatus(`Receipt printed to ${printed.device}.`, "success");
+      } else {
+        modal.note = printed.error ?? "Printing failed.";
+        setStatus(`Receipt not printed — ${printed.error}`, "warning");
+      }
+      updateUI();
+      return;
+    }
+    if (key.name === "escape" || key.name === "return") {
+      closeModal();
+      return;
+    }
   }
 
   if (key.name === "escape" || key.name === "return") {
@@ -3193,6 +3414,10 @@ function handleSettingsKey(key: KeyEvent): void {
     handleStoreFormKey(key);
     return;
   }
+  if (printerForm) {
+    handlePrinterFormKey(key);
+    return;
+  }
   if (userForm) {
     handleUserFormKey(key);
     return;
@@ -3278,6 +3503,11 @@ function handleSettingsKey(key: KeyEvent): void {
 
   if (settingsSection === "store") {
     if (key.name === "escape") backToSettingsMenu();
+    return;
+  }
+
+  if (settingsSection === "printer" && printerForm) {
+    handlePrinterFormKey(key);
     return;
   }
 
@@ -3454,6 +3684,7 @@ function tryGlobalNavigation(key: KeyEvent): boolean {
     ingredientForm !== null ||
     recipeEditor !== null ||
     storeForm !== null ||
+    printerForm !== null ||
     userForm !== null ||
     dataImportMode ||
     shortcutCapture !== null;
@@ -3464,7 +3695,9 @@ function tryGlobalNavigation(key: KeyEvent): boolean {
       action === "analytics" ||
       action === "settings" ||
       action === "history" ||
-      action === "logout")
+      action === "logout" ||
+      action === "discount" ||
+      action === "checkout")
   ) {
     return false;
   }

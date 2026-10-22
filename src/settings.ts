@@ -3,6 +3,7 @@ import {
   getSetting,
   saveStoreConfig,
   setSetting,
+  deleteSetting,
   type StoreConfig,
   type StoreConfigInput,
 } from "./db/database";
@@ -53,6 +54,17 @@ export const DEFAULT_BINDINGS: Keybindings = Object.fromEntries(
 
 const BINDINGS_KEY = "keybindings";
 const THEME_KEY = "theme";
+const PRINT_MODE_KEY = "receipt_print_mode";
+const PRINTER_DEVICE_KEY = "receipt_printer_device";
+
+export type ReceiptPrintMode = "auto" | "ask" | "off";
+
+export const PRINT_MODES: Array<{ mode: ReceiptPrintMode; label: string; description: string }> = [
+  { mode: "auto", label: "Auto print", description: "Print immediately after checkout" },
+  { mode: "ask", label: "Ask after checkout", description: "Show a print prompt on the receipt" },
+  { mode: "off", label: "Off", description: "Keep receipts on screen only" },
+];
+
 
 const RESERVED_KEYS = new Set([
   "escape",
@@ -161,6 +173,30 @@ export function loadThemeKey(): string {
 
 export function saveThemeKey(key: string): void {
   if (themes[key]) setSetting(THEME_KEY, key);
+}
+
+/* ------------------------------------------------------------------ */
+/* Receipt printer                                                     */
+/* ------------------------------------------------------------------ */
+
+export function loadReceiptPrintMode(): ReceiptPrintMode {
+  const saved = getSetting(PRINT_MODE_KEY);
+  if (saved === "ask" || saved === "off" || saved === "auto") return saved;
+  return "auto";
+}
+
+export function saveReceiptPrintMode(mode: ReceiptPrintMode): void {
+  setSetting(PRINT_MODE_KEY, mode);
+}
+
+export function loadReceiptPrinterDevice(): string {
+  return getSetting(PRINTER_DEVICE_KEY) ?? "";
+}
+
+export function saveReceiptPrinterDevice(device: string): void {
+  const trimmed = device.trim();
+  if (trimmed) setSetting(PRINTER_DEVICE_KEY, trimmed);
+  else deleteSetting(PRINTER_DEVICE_KEY);
 }
 
 /* ------------------------------------------------------------------ */

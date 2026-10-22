@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 
 /**
  * 80mm thermal receipt formatting.
@@ -13,6 +13,19 @@ export const RECEIPT_WIDTH = 42;
 export const ESC_POS_INIT = "\x1b@";
 export const ESC_POS_CUT = "\x1d\x56\x00";
 const DEFAULT_RECEIPT_LOG = "receipts.log";
+const COMMON_PRINTER_DEVICES = ["/dev/usb/lp0", "/dev/lp0", "/dev/ttyUSB0", "COM1"];
+
+export interface PrintResult {
+  ok: boolean;
+  device?: string;
+  error?: string;
+}
+
+export interface DetectedPrinter {
+  device?: string;
+  error?: string;
+}
+
 
 export interface ReceiptItem {
   name: string;
@@ -157,6 +170,41 @@ export function generateReceiptText(data: ReceiptData): string {
 export function generateEscPosReceipt(receipt: string): string {
   return `${ESC_POS_INIT}\n${receipt.trimEnd()}\n\n\n\n${ESC_POS_CUT}`;
 }
+
+/**
+ * Resolve the printer path: explicit setting first, then RETRO_POS_PRINTER,
+ * then common Linux/macOS/Windows device names.
+ */
+export function detectPrinterDevice(configured = ""): DetectedPrinter {
+  const explicit = configured.trim() || (process.env.RETRO_POS_PRINTER ?? "").trim();
+  if (explicit) {
+    if (!existsSync(explicit)) return { error: `Printer not found at ${explicit}.` };
+    return { device: explicit };
+  }
+
+  for (const candidate of COMMON_PRINTER_DEVICES) {
+    if (existsSync(candidate)) return { device: candidate };
+  }
+  return { error: "No printer detected. Set a device in Settings → Receipt printer." };
+}
+
+/** Send one ESC/POS receipt to the configured device. */
+export function printReceipt(receipt: string, configuredDevice = ""): PrintResult {
+  const detected = detectPrinterDevice(configuredDevice);
+  if (!detected.device) return { ok: false, error: detected.error };
+
+  try {
+    appendFileSync(detected.device, generateEscPosReceipt(receipt), "utf8");
+    return { ok: true, device: detected.device };
+  } catch (error) {
+    return {
+      ok: false,
+      device: detected.device,
+      error: `Could not write to ${detected.device}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 
 /** Append one receipt to receipts.log. Completed sales are never overwritten. */
 export function appendReceiptToLog(receipt: string, path = DEFAULT_RECEIPT_LOG): string {
