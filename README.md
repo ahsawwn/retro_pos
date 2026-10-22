@@ -2,7 +2,7 @@
 
 A retro terminal point-of-sale built with [Bun](https://bun.com), [OpenTUI](https://opentui.com), and `bun:sqlite`.
 
-RetroPOS is a complete keyboard-driven checkout terminal: PIN login with role-based access, first-run store setup, barcode/search sales, cash/card/mobile payments, inventory, cafe recipes, sales history, analytics, CSV/JSON import and export, and persistent themes and shortcuts.
+RetroPOS is a complete keyboard-driven checkout terminal: PIN login with role-based access, first-run store setup, barcode/search sales, cash/card/mobile payments, inventory, cafe recipes, sales history, analytics, CSV/JSON import and export, persistent themes, till/cash drawer, items/ingredients, and customizable receipt width.
 
 ## Run
 
@@ -17,7 +17,7 @@ Type check:
 bun check
 ```
 
-The first launch opens a nine-step onboarding wizard. It saves your store name, address, Cafe or Retail mode, currency symbol, tax rate, and the first Admin account, then signs you in automatically.
+The first launch opens a multi-step onboarding wizard. It asks for store name, address, and store type — **Coffee Shop / Cafe** (ingredients + recipes), **Hardware Store / Retail** (unit stock only), or **Custom** (then choose whether to enable recipes and ingredient stock deduction). It then saves your currency symbol, tax rate, and the first Admin account, then signs you in automatically.
 
 ## Sign-in and roles
 
@@ -45,7 +45,10 @@ All bindings below are defaults. Every action can be remapped in **Settings → 
 | `F6` | Sales history |
 | `F7` | Keyboard help |
 | `F8` | Sign out / lock terminal |
+| `F9` | Till / cash drawer |
 | `F10` | Checkout |
+| `F11` | Items (ingredients / raw materials) |
+| `F12` | Recipes (product ⇄ ingredient links) |
 
 ## Point of sale
 
@@ -96,6 +99,10 @@ Analytics reports today, this week, and all-time revenue and transaction counts,
 - **User accounts** manages Admins, Managers, and Cashiers, including PIN resets.
 - **Import / export** writes `products_export.csv` and imports products from CSV or JSON by upserting on barcode.
 - **Sign out** locks the terminal without quitting the app.
+
+- **Till & stock rules** — configure sales without a till and oversell behavior:
+  - **Allow sale without a till** — when enabled, checkout proceeds even if no till is open; when disabled (default), checkout requires an open till
+  - **Allow negative selling** — when enabled, overselling is allowed with a warning; stock may go negative; when disabled (default), overselling is blocked as before
 
 Settings and the selected theme are stored in SQLite, so both survive restarts. The same applies to the store profile and key bindings.
 
