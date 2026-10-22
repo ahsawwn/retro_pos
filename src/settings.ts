@@ -19,6 +19,9 @@ export type ActionName =
   | "search"
   | "discount"
   | "inventory"
+  | "items"
+  | "recipes"
+  | "till"
   | "analytics"
   | "settings"
   | "theme"
@@ -38,6 +41,9 @@ export const ACTIONS: ActionDefinition[] = [
   { action: "search", label: "Search / scan", description: "Focus the search bar", defaultKey: "/" },
   { action: "discount", label: "Discount", description: "Cycle cart discount", defaultKey: "d" },
   { action: "inventory", label: "Inventory", description: "Open inventory", defaultKey: "f2" },
+  { action: "items", label: "Items", description: "Open the items / ingredients list", defaultKey: "f11" },
+  { action: "recipes", label: "Recipes", description: "Open the recipes list", defaultKey: "f12" },
+  { action: "till", label: "Till", description: "Open the till and cash drawer", defaultKey: "f9" },
   { action: "analytics", label: "Analytics", description: "Open analytics", defaultKey: "f3" },
   { action: "settings", label: "Settings", description: "Open settings", defaultKey: "f4" },
   { action: "theme", label: "Theme", description: "Cycle colour theme", defaultKey: "f5" },
@@ -56,6 +62,9 @@ const BINDINGS_KEY = "keybindings";
 const THEME_KEY = "theme";
 const PRINT_MODE_KEY = "receipt_print_mode";
 const PRINTER_DEVICE_KEY = "receipt_printer_device";
+const RECEIPT_WIDTH_KEY = "receipt_width";
+const ALLOW_SALE_WITHOUT_TILL_KEY = "allow_sale_without_till";
+const ALLOW_NEGATIVE_STOCK_KEY = "allow_negative_stock";
 
 export type ReceiptPrintMode = "auto" | "ask" | "off";
 
@@ -63,6 +72,13 @@ export const PRINT_MODES: Array<{ mode: ReceiptPrintMode; label: string; descrip
   { mode: "auto", label: "Auto print", description: "Print immediately after checkout" },
   { mode: "ask", label: "Ask after checkout", description: "Show a print prompt on the receipt" },
   { mode: "off", label: "Off", description: "Keep receipts on screen only" },
+];
+
+export type ReceiptWidth = 80 | 57;
+
+export const RECEIPT_WIDTHS: Array<{ width: ReceiptWidth; label: string; description: string }> = [
+  { width: 80, label: "80mm (42 col)", description: "Standard 80mm thermal roll" },
+  { width: 57, label: "57mm (32 col)", description: "Compact 57mm mobile printer roll" },
 ];
 
 
@@ -197,6 +213,36 @@ export function saveReceiptPrinterDevice(device: string): void {
   const trimmed = device.trim();
   if (trimmed) setSetting(PRINTER_DEVICE_KEY, trimmed);
   else deleteSetting(PRINTER_DEVICE_KEY);
+}
+
+export function loadReceiptWidth(): ReceiptWidth {
+  return getSetting(RECEIPT_WIDTH_KEY) === "57" ? 57 : 80;
+}
+
+export function saveReceiptWidth(width: ReceiptWidth): void {
+  setSetting(RECEIPT_WIDTH_KEY, String(width));
+}
+
+/* ------------------------------------------------------------------ */
+/* Till and stock rules                                                */
+/* ------------------------------------------------------------------ */
+
+/** When on, checkout is allowed even if no till session is open. */
+export function loadAllowSaleWithoutTill(): boolean {
+  return getSetting(ALLOW_SALE_WITHOUT_TILL_KEY) === "1";
+}
+
+export function saveAllowSaleWithoutTill(allow: boolean): void {
+  setSetting(ALLOW_SALE_WITHOUT_TILL_KEY, allow ? "1" : "0");
+}
+
+/** When on, selling more than the stock on hand is allowed (stock goes negative). */
+export function loadAllowNegativeStock(): boolean {
+  return getSetting(ALLOW_NEGATIVE_STOCK_KEY) === "1";
+}
+
+export function saveAllowNegativeStock(allow: boolean): void {
+  setSetting(ALLOW_NEGATIVE_STOCK_KEY, allow ? "1" : "0");
 }
 
 /* ------------------------------------------------------------------ */

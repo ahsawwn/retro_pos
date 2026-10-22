@@ -9,22 +9,30 @@ import {
 import {
   addIngredient,
   addProduct,
+  addTillMovement,
+  closeTillSession,
   deleteIngredient,
   deleteProduct,
   exportProductsCsv,
   getAnalytics,
   getIngredientById,
   getIngredients,
+  getOpenTillSession,
   getProductAvailability,
   getProductByBarcode,
   getProductById,
   getProducts,
+  getRecentTillSessions,
   getRecentTransactions,
   getRecipesForProduct,
+  getTillMovements,
+  getTillReport,
+  getTillSessionById,
   getTodayStats,
   getTransactionItems,
   importProductsFile,
   initDb,
+  openTillSession,
   recordTransaction,
   searchProducts,
   seedStoreData,
@@ -38,6 +46,9 @@ import {
   type Product,
   type StoreConfig,
   type StoreType,
+  type TillMovement,
+  type TillReport,
+  type TillSession,
   type TransactionRecord,
 } from "./db/database";
 import {
@@ -58,25 +69,33 @@ import {
   ACTIONS,
   DEFAULT_BINDINGS,
   PRINT_MODES,
+  RECEIPT_WIDTHS,
   actionForKey,
   actionForKeyExcluding,
   bindingLabel,
   isReservedBinding,
+  loadAllowNegativeStock,
+  loadAllowSaleWithoutTill,
   loadKeybindings,
   loadReceiptPrintMode,
   loadReceiptPrinterDevice,
+  loadReceiptWidth,
   loadStoreProfile,
   loadThemeKey,
   normalizeBindingKey,
   resetKeybindings,
+  saveAllowNegativeStock,
+  saveAllowSaleWithoutTill,
   saveKeybindings,
   saveReceiptPrintMode,
   saveReceiptPrinterDevice,
+  saveReceiptWidth,
   saveThemeKey,
   updateStoreProfile,
   type ActionName,
   type Keybindings,
   type ReceiptPrintMode,
+  type ReceiptWidth,
 } from "./settings";
 import { cycleTheme, getTheme, setTheme, type Theme } from "./themes/themes";
 import {
@@ -95,17 +114,42 @@ import {
 /* ------------------------------------------------------------------ */
 
 type Screen = "login" | "onboarding" | "app";
-type View = "POS" | "INVENTORY" | "HISTORY" | "ANALYTICS" | "SETTINGS";
-type Focus = "SEARCH" | "CATALOG" | "CART" | "INVENTORY" | "HISTORY" | "ANALYTICS" | "SETTINGS";
+type View = "POS" | "INVENTORY" | "ITEMS" | "RECIPES" | "HISTORY" | "ANALYTICS" | "TILL" | "SETTINGS";
+type Focus =
+  | "SEARCH"
+  | "CATALOG"
+  | "CART"
+  | "INVENTORY"
+  | "HISTORY"
+  | "ANALYTICS"
+  | "SETTINGS"
+  | "ITEMS"
+  | "RECIPES"
+  | "TILL";
 type StatusKind = "info" | "success" | "warning" | "danger";
 type InventoryMode = "products" | "ingredients";
-type SettingsSection = "menu" | "store" | "printer" | "shortcuts" | "users" | "data";
+type SettingsSection = "menu" | "store" | "printer" | "till" | "shortcuts" | "users" | "data";
 
 interface PrinterForm {
-  field: 0 | 1;
+  field: 0 | 1 | 2;
   mode: ReceiptPrintMode;
+  width: ReceiptWidth;
   device: string;
   message: string;
+}
+
+interface TillForm {
+  mode: "open" | "close" | "in" | "out";
+  amount: string;
+  reason: string;
+  field: 0 | 1;
+}
+
+interface RecipeEditor {
+  productId: number;
+  productName: string;
+  index: number;
+  rows: Array<{ ingredientId: number; name: string; unit: string; quantity: string }>;
 }
 
 interface ProductForm {
@@ -126,13 +170,6 @@ interface IngredientForm {
   unit: string;
   stock: string;
   lowStock: string;
-}
-
-interface RecipeEditor {
-  productId: number;
-  productName: string;
-  index: number;
-  rows: Array<{ ingredientId: number; name: string; unit: string; quantity: string }>;
 }
 
 interface StoreForm {
@@ -167,6 +204,8 @@ interface OnboardingState {
   name: string;
   address: string;
   storeType: StoreType;
+  storeTypeChoice: "cafe" | "retail" | "custom";
+  customRecipes: boolean;
   currency: string;
   taxRate: string;
   adminUsername: string;
@@ -181,7 +220,15 @@ type ModalState =
   | { kind: "payment"; methodIndex: number; tendered: string; error: string | null }
   | {
       kind: "confirm";
-      action: "clear-cart" | "delete-product" | "delete-ingredient" | "delete-user" | "logout";
+      action:
+        | "clear-cart"
+        | "delete-product"
+        | "delete-ingredient"
+        | "delete-user"
+        | "delete-recipe"
+        | "oversell"
+        | "close-till"
+        | "logout";
       message: string;
       productId?: number;
       ingredientId?: number;
@@ -195,15 +242,35 @@ const STORE_FIELDS = ["Name", "Address", "Type", "Currency", "Tax %"] as const;
 const DISCOUNTS = [0, 5, 10, 15, 20];
 const PAYMENT_METHODS = ["Cash", "Card", "Mobile"] as const;
 const ONBOARDING_STEPS = 9;
+/** Ordered onboarding steps. A "custom" store type inserts a features step. */
+type OnboardingStepKey =
+  | "name"
+  | "address"
+  | "type"
+  | "features"
+  | "currency"
+  | "tax"
+  | "admin"
+  | "pin"
+  | "confirm"
+  | "review";
+function onboardingStepKeys(state: OnboardingState): OnboardingStepKey[] {
+  const keys: OnboardingStepKey[] = ["name", "address", "type"];
+  if (state.storeTypeChoice === "custom") keys.push("features");
+  keys.push("currency", "tax", "admin", "pin", "confirm", "review");
+  return keys;
+}
 const POS_FOCUS_ORDER: Focus[] = ["SEARCH", "CATALOG", "CART"];
 const SETTINGS_MENU = [
   { title: "Store profile", detail: "Name, address, type, currency, tax" },
-  { title: "Receipt printer", detail: "Auto print, ask, device, test" },
+  { title: "Receipt printer", detail: "Auto/ask, 80mm or 57mm, device, test" },
+  { title: "Till & stock rules", detail: "Sale without till, negative selling" },
   { title: "Keyboard shortcuts", detail: "Remap global and POS keys" },
   { title: "User accounts", detail: "Admins, managers, and cashiers" },
   { title: "Import / export", detail: "Bulk product CSV or JSON" },
   { title: "Sign out", detail: "Lock the terminal" },
 ] as const;
+const VIEW_ORDER: View[] = ["POS", "INVENTORY", "ITEMS", "RECIPES", "HISTORY", "ANALYTICS", "TILL", "SETTINGS"];
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -218,6 +285,9 @@ let activeTheme: Theme = getTheme();
 let bindings: Keybindings = loadKeybindings();
 let receiptPrintMode: ReceiptPrintMode = loadReceiptPrintMode();
 let printerDevice = loadReceiptPrinterDevice();
+let receiptWidth: ReceiptWidth = loadReceiptWidth();
+let allowSaleWithoutTill = loadAllowSaleWithoutTill();
+let allowNegativeStock = loadAllowNegativeStock();
 let currencySymbol = storeConfig?.currency ?? "$";
 let taxRate = storeConfig?.tax_rate ?? 0;
 
@@ -247,6 +317,12 @@ let recipeEditor: RecipeEditor | null = null;
 let inventoryMode: InventoryMode = "products";
 let inventoryIndex = 0;
 let ingredientIndex = 0;
+let itemIndex = 0;
+let recipeIndex = 0;
+let tillSession: TillSession | null = storeConfig ? getOpenTillSession() : null;
+let tillSessions: TillSession[] = storeConfig ? getRecentTillSessions(30) : [];
+let tillIndex = 0;
+let tillMovements: TillMovement[] = [];
 let modal: ModalState = null;
 let modalScroll = 0;
 
@@ -256,6 +332,8 @@ let onboarding: OnboardingState = {
   name: "",
   address: "",
   storeType: "cafe",
+  storeTypeChoice: "cafe",
+  customRecipes: false,
   currency: "$",
   taxRate: "5",
   adminUsername: "admin",
@@ -268,7 +346,9 @@ let settingsSection: SettingsSection = "menu";
 let settingsMenuIndex = 0;
 let storeForm: StoreForm | null = null;
 let printerForm: PrinterForm | null = null;
+let tillForm: TillForm | null = null;
 let shortcutIndex = 0;
+let settingsRuleIndex = 0;
 let shortcutCapture: ActionName | null = null;
 let userIndex = 0;
 let userForm: UserForm | null = null;
@@ -352,8 +432,18 @@ function clampSelections(): void {
   cartIndex = clamp(cartIndex, 0, Math.max(0, cart.length - 1));
   inventoryIndex = clamp(inventoryIndex, 0, Math.max(0, products.length - 1));
   ingredientIndex = clamp(ingredientIndex, 0, Math.max(0, ingredients.length - 1));
+  itemIndex = clamp(itemIndex, 0, Math.max(0, ingredients.length - 1));
+  recipeIndex = clamp(recipeIndex, 0, Math.max(0, products.length - 1));
+  tillIndex = clamp(tillIndex, 0, Math.max(0, tillSessions.length - 1));
   historyIndex = clamp(historyIndex, 0, Math.max(0, history.length - 1));
   userIndex = clamp(userIndex, 0, Math.max(0, accounts.length - 1));
+}
+
+function refreshTill(): void {
+  tillSession = getOpenTillSession();
+  tillSessions = getRecentTillSessions(30);
+  tillMovements = tillSession ? getTillMovements(tillSession.id) : [];
+  tillIndex = clamp(tillIndex, 0, Math.max(0, tillSessions.length - 1));
 }
 
 function refreshProducts(): void {
@@ -381,6 +471,7 @@ function refreshAll(): void {
   todayStats = getTodayStats();
   analytics = getAnalytics();
   accounts = listAccounts();
+  refreshTill();
   clampSelections();
 }
 
@@ -396,7 +487,21 @@ function cycleFocus(direction: 1 | -1): void {
     setFocus(next);
     return;
   }
-  setFocus(currentView === "INVENTORY" ? "INVENTORY" : currentView === "SETTINGS" ? "SETTINGS" : currentView === "ANALYTICS" ? "ANALYTICS" : "HISTORY");
+  setFocus(
+    currentView === "INVENTORY"
+      ? "INVENTORY"
+      : currentView === "ITEMS"
+        ? "ITEMS"
+        : currentView === "RECIPES"
+          ? "RECIPES"
+          : currentView === "TILL"
+            ? "TILL"
+            : currentView === "SETTINGS"
+              ? "SETTINGS"
+              : currentView === "ANALYTICS"
+                ? "ANALYTICS"
+                : "HISTORY"
+  );
 }
 
 function setFocus(next: Focus): void {
@@ -408,14 +513,17 @@ function setFocus(next: Focus): void {
 function viewLabel(): string {
   if (currentView === "POS") return "POINT OF SALE";
   if (currentView === "INVENTORY") return "INVENTORY";
+  if (currentView === "ITEMS") return "ITEMS / INGREDIENTS";
+  if (currentView === "RECIPES") return "RECIPES";
   if (currentView === "HISTORY") return "SALES HISTORY";
   if (currentView === "ANALYTICS") return "ANALYTICS";
+  if (currentView === "TILL") return "TILL / CASH DRAWER";
   return "SETTINGS";
 }
 
 function viewAllowed(view: View): boolean {
   if (!currentUser) return false;
-  if (view === "INVENTORY" || view === "ANALYTICS" || view === "SETTINGS") {
+  if (view === "INVENTORY" || view === "ITEMS" || view === "RECIPES" || view === "ANALYTICS" || view === "SETTINGS" || view === "TILL") {
     return canManageStore(currentUser.role);
   }
   return true;
@@ -436,6 +544,7 @@ function switchView(view: View): void {
   recipeEditor = null;
   storeForm = null;
   printerForm = null;
+  tillForm = null;
   userForm = null;
   shortcutCapture = null;
   dataImportMode = false;
@@ -450,6 +559,16 @@ function switchView(view: View): void {
     inventoryMode = "products";
     setFocus("INVENTORY");
     setStatus("Inventory management — Enter edits the selected product.");
+  } else if (view === "ITEMS") {
+    refreshProducts();
+    itemIndex = 0;
+    setFocus("ITEMS");
+    setStatus("Items — raw materials and ingredients. A adds, Enter edits.");
+  } else if (view === "RECIPES") {
+    refreshProducts();
+    recipeIndex = 0;
+    setFocus("RECIPES");
+    setStatus("Recipes — link products to ingredients. Enter edits a recipe.");
   } else if (view === "HISTORY") {
     refreshHistory();
     setFocus("HISTORY");
@@ -458,6 +577,14 @@ function switchView(view: View): void {
     refreshHistory();
     setFocus("ANALYTICS");
     setStatus("Analytics refreshed from the sales ledger.");
+  } else if (view === "TILL") {
+    refreshTill();
+    setFocus("TILL");
+    setStatus(
+      tillSession
+        ? `Till #${tillSession.id} is open — float ${money(tillSession.opening_float)}.`
+        : "Till is closed — press O to open it."
+    );
   } else {
     settingsSection = "menu";
     settingsMenuIndex = 0;
@@ -570,6 +697,11 @@ function openClearCartConfirm(): void {
   };
 }
 
+function openPaymentModal(): void {
+  modal = { kind: "payment", methodIndex: 0, tendered: "", error: null };
+  updateUI();
+}
+
 function beginCheckout(): void {
   if (!currentUser || !storeConfig) return;
   if (cart.length === 0) {
@@ -577,15 +709,37 @@ function beginCheckout(): void {
     return;
   }
 
-  const error = validateSale(cart, storeType());
+  if (!tillSession && !allowSaleWithoutTill) {
+    setStatus("No till is open. Open the till (F9) or enable sales without a till in Settings.", "warning");
+    updateUI();
+    return;
+  }
+
+  const error = validateSale(cart, storeType(), allowNegativeStock);
   if (error) {
     setStatus(error, "danger");
     refreshProducts();
     return;
   }
 
-  modal = { kind: "payment", methodIndex: 0, tendered: "", error: null };
-  updateUI();
+  if (allowNegativeStock) {
+    const oversold = cart.filter((item) => {
+      const available = availabilityFor(item.id);
+      return item.qty > available;
+    });
+    if (oversold.length > 0) {
+      const names = oversold.map((item) => `${item.name} (${item.qty} > ${availabilityFor(item.id)})`).join(", ");
+      modal = {
+        kind: "confirm",
+        action: "oversell",
+        message: `Selling beyond stock: ${names}. Stock will go negative. Continue?`,
+      };
+      updateUI();
+      return;
+    }
+  }
+
+  openPaymentModal();
 }
 
 function receiptForValues(
@@ -619,6 +773,7 @@ function receiptForValues(
     amountTendered: tendered,
     changeDue: change,
     currency: currencySymbol,
+    widthMm: receiptWidth,
   };
   return generateReceiptText(data);
 }
@@ -667,6 +822,8 @@ function completeSale(methodIndex: number, tenderedText: string): void {
       cashierName: currentUser.username,
       amountTendered: tendered,
       changeDue: change,
+      tillSessionId: tillSession?.id ?? null,
+      allowNegative: allowNegativeStock,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -718,6 +875,7 @@ function completeSale(methodIndex: number, tenderedText: string): void {
   catalogIndex = 0;
   refreshProducts();
   refreshHistory();
+  refreshTill();
 
   modal = {
     kind: "receipt",
@@ -726,7 +884,8 @@ function completeSale(methodIndex: number, tenderedText: string): void {
     note,
   };
   modalScroll = 0;
-  setStatus(`Sale #${transactionId} complete — ${money(total)} ${method.toLowerCase()}.`, "success");
+  const tillLabel = tillSession ? "" : " (no open till)";
+  setStatus(`Sale #${transactionId} complete — ${money(total)} ${method.toLowerCase()}${tillLabel}.`, "success");
   updateUI();
 }
 
@@ -734,48 +893,103 @@ function completeSale(methodIndex: number, tenderedText: string): void {
 /* First-run onboarding                                                */
 /* ------------------------------------------------------------------ */
 
-function onboardingValue(state: OnboardingState, step: number): string {
-  if (step === 0) return state.name;
-  if (step === 1) return state.address;
-  if (step === 3) return state.currency;
-  if (step === 4) return state.taxRate;
-  if (step === 5) return state.adminUsername;
-  if (step === 6) return state.adminPin;
-  if (step === 7) return state.confirmPin;
-  return "";
+function onboardingKeys(): OnboardingStepKey[] {
+  const base: OnboardingStepKey[] = ["name", "address", "type"];
+  if (onboarding.storeTypeChoice === "custom") base.push("features");
+  return [...base, "currency", "tax", "admin", "pin", "confirm", "review"];
 }
 
-function setOnboardingValue(state: OnboardingState, step: number, value: string): void {
-  if (step === 0) state.name = value;
-  else if (step === 1) state.address = value;
-  else if (step === 3) state.currency = value;
-  else if (step === 4) state.taxRate = value;
-  else if (step === 5) state.adminUsername = value;
-  else if (step === 6) state.adminPin = value;
-  else if (step === 7) state.confirmPin = value;
+function onboardingCurrentKey(): OnboardingStepKey {
+  const keys = onboardingKeys();
+  const safeIndex = clamp(onboarding.step, 0, keys.length - 1);
+  return keys[safeIndex] ?? "review";
 }
 
-function onboardingError(state: OnboardingState): string | null {
-  if (state.step === 0 && !state.name.trim()) return "Enter the store name printed on receipts.";
-  if (state.step === 1 && !state.address.trim()) return "Enter the store address printed on receipts.";
-  if (state.step === 3 && !state.currency.trim()) return "Enter a currency symbol.";
-  if (state.step === 4) {
-    const value = Number.parseFloat(state.taxRate);
-    if (!Number.isFinite(value) || value < 0 || value > 100) return "Tax rate must be between 0 and 100.";
+function onboardingValue(state: OnboardingState, key: OnboardingStepKey): string {
+  switch (key) {
+    case "name":
+      return state.name;
+    case "address":
+      return state.address;
+    case "currency":
+      return state.currency;
+    case "tax":
+      return state.taxRate;
+    case "admin":
+      return state.adminUsername;
+    case "pin":
+      return state.adminPin;
+    case "confirm":
+      return state.confirmPin;
+    default:
+      return "";
   }
-  if (state.step === 5 && !/^[a-zA-Z0-9_.-]{2,24}$/.test(state.adminUsername.trim())) {
-    return "Admin username must be 2–24 letters, numbers, dots, dashes, or underscores.";
+}
+
+function setOnboardingValue(state: OnboardingState, key: OnboardingStepKey, value: string): void {
+  switch (key) {
+    case "name":
+      state.name = value;
+      break;
+    case "address":
+      state.address = value;
+      break;
+    case "currency":
+      state.currency = value;
+      break;
+    case "tax":
+      state.taxRate = value;
+      break;
+    case "admin":
+      state.adminUsername = value;
+      break;
+    case "pin":
+      state.adminPin = value;
+      break;
+    case "confirm":
+      state.confirmPin = value;
+      break;
   }
-  if (state.step === 6 && !isPinFormatValid(state.adminPin)) return "Admin PIN must be 4–6 digits.";
-  if (state.step === 7 && state.adminPin !== state.confirmPin) return "PINs do not match.";
-  if (state.step === 8) {
-    if (!hasAccounts() && !isPinFormatValid(state.adminPin)) return "Return to the PIN step and set an admin PIN.";
+}
+
+function onboardingError(state: OnboardingState, key: OnboardingStepKey): string | null {
+  switch (key) {
+    case "name":
+      if (!state.name.trim()) return "Enter the store name printed on receipts.";
+      break;
+    case "address":
+      if (!state.address.trim()) return "Enter the store address printed on receipts.";
+      break;
+    case "type":
+      break;
+    case "features":
+      break;
+    case "currency":
+      if (!state.currency.trim()) return "Enter a currency symbol.";
+      break;
+    case "tax": {
+      const value = Number.parseFloat(state.taxRate);
+      if (!Number.isFinite(value) || value < 0 || value > 100) return "Tax rate must be between 0 and 100.";
+      break;
+    }
+    case "admin":
+      if (!/^[a-zA-Z0-9_.-]{2,24}$/.test(state.adminUsername.trim()))
+        return "Admin username must be 2–24 letters, numbers, dots, dashes, or underscores.";
+      break;
+    case "pin":
+      if (!isPinFormatValid(state.adminPin)) return "Admin PIN must be 4–6 digits.";
+      break;
+    case "confirm":
+      if (state.adminPin !== state.confirmPin) return "PINs do not match.";
+      break;
+    case "review":
+      break;
   }
   return null;
 }
 
 function finishOnboarding(): void {
-  const error = onboardingError(onboarding);
+  const error = onboardingError(onboarding, onboardingCurrentKey());
   if (error) {
     onboarding.error = error;
     updateUI();
@@ -783,10 +997,11 @@ function finishOnboarding(): void {
   }
 
   try {
+    const derivedType: StoreType = onboarding.storeType === "cafe" || onboarding.customRecipes ? "cafe" : "retail";
     const config = updateStoreProfile({
       name: onboarding.name,
       address: onboarding.address,
-      storeType: onboarding.storeType,
+      storeType: derivedType,
       currency: onboarding.currency,
       taxRate: Number.parseFloat(onboarding.taxRate || "0"),
     });
@@ -818,18 +1033,20 @@ function finishOnboarding(): void {
 }
 
 function advanceOnboarding(): void {
-  const error = onboardingError(onboarding);
+  const error = onboardingError(onboarding, onboardingCurrentKey());
   if (error) {
     onboarding.error = error;
     updateUI();
     return;
   }
   onboarding.error = "";
-  if (onboarding.step >= ONBOARDING_STEPS - 1) {
+  const keys = onboardingKeys();
+  const index = clamp(onboarding.step, 0, keys.length - 1);
+  if (keys[index] === "review") {
     finishOnboarding();
     return;
   }
-  onboarding.step += 1;
+  onboarding.step = index + 1;
   updateUI();
 }
 
@@ -852,21 +1069,50 @@ function handleOnboardingKey(key: KeyEvent): void {
     return;
   }
 
-  if (step === 2) {
-    if (key.name === "left" || key.name === "right" || key.name === "space" || key.name === "1" || key.name === "2") {
-      const chooseCafe =
-        key.name === "left" || key.name === "1" || (key.name === "space" && onboarding.storeType === "retail");
-      onboarding.storeType = chooseCafe ? "cafe" : "retail";
+  const stepKey = onboardingCurrentKey();
+
+  if (stepKey === "type") {
+    if (
+      key.name === "left" ||
+      key.name === "right" ||
+      key.name === "space" ||
+      key.name === "1" ||
+      key.name === "2" ||
+      key.name === "3"
+    ) {
+      if (key.name === "1") onboarding.storeTypeChoice = "cafe";
+      else if (key.name === "2") onboarding.storeTypeChoice = "retail";
+      else if (key.name === "3") onboarding.storeTypeChoice = "custom";
+      else onboarding.storeTypeChoice = key.name === "left" ? "cafe" : key.name === "right" ? "retail" : "custom";
       onboarding.error = "";
       updateUI();
     }
     return;
   }
 
-  if (step === 8) return;
+  if (stepKey === "features") {
+    if (key.name === "up" || key.name === "down") {
+      onboarding.customRecipes = !onboarding.customRecipes;
+      onboarding.error = "";
+      updateUI();
+      return;
+    }
+    if (key.name === "return") {
+      onboarding.storeType = onboarding.customRecipes ? "cafe" : "retail";
+      onboarding.step += 1;
+      onboarding.error = "";
+      updateUI();
+      return;
+    }
+    return;
+  }
+
+  if (stepKey === "review") {
+    return;
+  }
 
   if (key.name === "backspace") {
-    setOnboardingValue(onboarding, step, onboardingValue(onboarding, step).slice(0, -1));
+    setOnboardingValue(onboarding, stepKey, onboardingValue(onboarding, stepKey).slice(0, -1));
     onboarding.error = "";
     updateUI();
     return;
@@ -875,19 +1121,19 @@ function handleOnboardingKey(key: KeyEvent): void {
   if (!printable) return;
   const character = key.sequence;
 
-  if (step === 4 && ((character === "." && onboarding.taxRate.includes(".")) || !/[0-9.]/.test(character))) {
+  if (stepKey === "tax" && ((character === "." && onboarding.taxRate.includes(".")) || !/[0-9.]/.test(character))) {
     return;
   }
-  if ((step === 6 || step === 7) && !/[0-9]/.test(character)) return;
+  if ((stepKey === "pin" || stepKey === "confirm") && !/[0-9]/.test(character)) return;
 
-  const current = onboardingValue(onboarding, step);
-  if ((step === 6 || step === 7) && current.length >= 6) return;
-  if (step === 3 && current.length >= 4) return;
-  if (step === 0 && current.length >= 48) return;
-  if (step === 1 && current.length >= 72) return;
-  if (step === 5 && current.length >= 24) return;
+  const current = onboardingValue(onboarding, stepKey);
+  if ((stepKey === "pin" || stepKey === "confirm") && current.length >= 6) return;
+  if (stepKey === "currency" && current.length >= 4) return;
+  if (stepKey === "name" && current.length >= 48) return;
+  if (stepKey === "address" && current.length >= 72) return;
+  if (stepKey === "admin" && current.length >= 24) return;
 
-  setOnboardingValue(onboarding, step, `${current}${character}`);
+  setOnboardingValue(onboarding, stepKey, `${current}${character}`);
   onboarding.error = "";
   updateUI();
 }
@@ -1058,9 +1304,17 @@ function saveProductForm(): void {
   updateUI();
 }
 
+function currentIngredientIndex(): number {
+  return currentView === "ITEMS" ? itemIndex : ingredientIndex;
+}
+
+function currentProductIndex(): number {
+  return currentView === "RECIPES" ? recipeIndex : inventoryIndex;
+}
+
 function openIngredientForm(mode: "new" | "edit"): void {
   if (mode === "edit") {
-    const ingredient = ingredients[ingredientIndex];
+    const ingredient = ingredients[currentIngredientIndex()];
     if (!ingredient) {
       setStatus("Select an ingredient to edit first.", "warning");
       return;
@@ -1085,7 +1339,7 @@ function openIngredientForm(mode: "new" | "edit"): void {
 function cancelIngredientForm(): void {
   ingredientForm = null;
   inputMode = false;
-  setFocus("INVENTORY");
+  setFocus(currentView === "ITEMS" ? "ITEMS" : "INVENTORY");
   setStatus("Ingredient edit cancelled.", "info");
   updateUI();
 }
@@ -1119,18 +1373,20 @@ function saveIngredientForm(): void {
       const id = addIngredient(input);
       refreshProducts();
       const index = ingredients.findIndex((ingredient) => ingredient.id === id);
-      ingredientIndex = index >= 0 ? index : 0;
+      if (currentView === "ITEMS") itemIndex = index >= 0 ? index : 0;
+      else ingredientIndex = index >= 0 ? index : 0;
       setStatus(`Added ingredient #${id} — ${form.name.trim()}.`, "success");
     } else if (form.id !== null) {
       updateIngredient(form.id, input);
       refreshProducts();
       const index = ingredients.findIndex((ingredient) => ingredient.id === form.id);
-      ingredientIndex = index >= 0 ? index : 0;
+      if (currentView === "ITEMS") itemIndex = index >= 0 ? index : 0;
+      else ingredientIndex = index >= 0 ? index : 0;
       setStatus(`Updated ingredient ${form.name.trim()}.`, "success");
     }
     ingredientForm = null;
     inputMode = false;
-    focus = "INVENTORY";
+    focus = currentView === "ITEMS" ? "ITEMS" : "INVENTORY";
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), "danger");
   }
@@ -1142,7 +1398,11 @@ function openRecipeEditor(): void {
     setStatus("Recipes are only used in Coffee Shop / Cafe mode.", "warning");
     return;
   }
-  const product = products[inventoryIndex];
+  if (ingredients.length === 0) {
+    setStatus("Add items first (Items view) before building a recipe.", "warning");
+    return;
+  }
+  const product = products[currentProductIndex()];
   if (!product) {
     setStatus("Select a product first.", "warning");
     return;
@@ -1177,7 +1437,7 @@ function saveRecipeEditor(): void {
     refreshProducts();
     recipeEditor = null;
     inputMode = false;
-    focus = "INVENTORY";
+    focus = currentView === "RECIPES" ? "RECIPES" : "INVENTORY";
     setStatus(`Recipe saved for ${editor.productName}.`, "success");
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), "danger");
@@ -1185,8 +1445,30 @@ function saveRecipeEditor(): void {
   updateUI();
 }
 
+function deleteRecipeForSelectedProduct(): void {
+  const product = products[currentProductIndex()];
+  if (!product) {
+    setStatus("Select a product first.", "warning");
+    return;
+  }
+  modal = {
+    kind: "confirm",
+    action: "delete-recipe",
+    productId: product.id,
+    message: `Remove the whole recipe for "${product.name}"?`,
+  };
+}
+
+function executeDeleteRecipe(productId: number): void {
+  const product = products.find((candidate) => candidate.id === productId);
+  if (!product) return;
+  setProductRecipe(productId, []);
+  refreshProducts();
+  setStatus(`Recipe cleared for ${product.name}.`, "warning");
+}
+
 function openDeleteProductConfirm(): void {
-  const product = products[inventoryIndex];
+  const product = products[currentProductIndex()];
   if (!product) {
     setStatus("Select a product to delete first.", "warning");
     return;
@@ -1200,7 +1482,7 @@ function openDeleteProductConfirm(): void {
 }
 
 function openDeleteIngredientConfirm(): void {
-  const ingredient = ingredients[ingredientIndex];
+  const ingredient = ingredients[currentIngredientIndex()];
   if (!ingredient) {
     setStatus("Select an ingredient to delete first.", "warning");
     return;
@@ -1231,10 +1513,123 @@ function executeDeleteIngredient(ingredientId: number): void {
   const deleted = deleteIngredient(ingredientId);
   refreshProducts();
   ingredientIndex = clamp(ingredientIndex, 0, Math.max(0, ingredients.length - 1));
+  itemIndex = clamp(itemIndex, 0, Math.max(0, ingredients.length - 1));
   setStatus(
     deleted ? `Deleted ingredient ${ingredient.name}.` : `${ingredient.name} was already removed.`,
     deleted ? "success" : "warning"
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Till actions                                                        */
+/* ------------------------------------------------------------------ */
+
+function openTillForm(mode: TillForm["mode"]): void {
+  if (mode === "close" && !tillSession) {
+    setStatus("No open till to close.", "warning");
+    updateUI();
+    return;
+  }
+  if ((mode === "in" || mode === "out") && !tillSession) {
+    setStatus("Open the till before recording cash movements.", "warning");
+    updateUI();
+    return;
+  }
+  tillForm = { mode, amount: "", reason: "", field: 0 };
+  inputMode = true;
+  const labels: Record<TillForm["mode"], string> = {
+    open: "Opening float",
+    close: "Counted cash",
+    in: "Cash in amount",
+    out: "Cash out amount",
+  };
+  setStatus(`${labels[mode]} — type a number, Tab for a note, Enter to confirm.`);
+  updateUI();
+}
+
+function saveTillForm(): void {
+  const form = tillForm;
+  if (!form || !currentUser) return;
+  const amount = Number.parseFloat(form.amount || "0");
+  try {
+    if (form.mode === "open") {
+      const id = openTillSession(amount, currentUser.username, form.reason);
+      refreshTill();
+      tillForm = null;
+      inputMode = false;
+      setStatus(`Till #${id} opened with float ${money(amount)}.`, "success");
+    } else if (form.mode === "close" && tillSession) {
+      const id = tillSession.id;
+      closeTillSession(id, amount, currentUser.username, form.reason);
+      const report = getTillReport(id);
+      refreshTill();
+      tillForm = null;
+      inputMode = false;
+      if (report) {
+        const variance = report.variance ?? 0;
+        const kind: StatusKind = Math.abs(variance) < 0.005 ? "success" : "warning";
+        setStatus(
+          `Till #${id} closed — expected ${money(report.expectedCash)}, counted ${money(amount)}, variance ${money(variance)}.`,
+          kind
+        );
+      } else {
+        setStatus(`Till #${id} closed.`, "success");
+      }
+    } else if ((form.mode === "in" || form.mode === "out") && tillSession) {
+      addTillMovement(tillSession.id, form.mode, amount, form.reason, currentUser.username);
+      refreshTill();
+      tillForm = null;
+      inputMode = false;
+      setStatus(`Cash ${form.mode} ${money(amount)} recorded for till #${tillSession.id}.`, "success");
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "danger");
+  }
+  updateUI();
+}
+
+function openCloseTillConfirm(): void {
+  if (!tillSession) {
+    setStatus("No open till to close.", "warning");
+    return;
+  }
+  openTillForm("close");
+}
+
+function handleTillFormKey(key: KeyEvent): void {
+  const form = tillForm;
+  if (!form) return;
+  if (key.name === "escape") {
+    tillForm = null;
+    inputMode = false;
+    setStatus("Till action cancelled.", "info");
+    updateUI();
+    return;
+  }
+  if (key.name === "tab" || key.name === "down" || key.name === "up") {
+    form.field = form.field === 0 ? 1 : 0;
+    updateUI();
+    return;
+  }
+  if (key.name === "return") {
+    saveTillForm();
+    return;
+  }
+  if (key.name === "backspace") {
+    if (form.field === 0) form.amount = form.amount.slice(0, -1);
+    else form.reason = form.reason.slice(0, -1);
+    updateUI();
+    return;
+  }
+  if (!isPrintable(key)) return;
+  if (form.field === 0) {
+    if (!/[0-9.]/.test(key.sequence)) return;
+    if (key.sequence === "." && form.amount.includes(".")) return;
+    form.amount += key.sequence;
+  } else if (form.reason.length < 40) {
+    form.reason += key.sequence;
+  }
+  updateUI();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1263,6 +1658,7 @@ function openSettingsSection(): void {
     printerForm = {
       field: 0,
       mode: receiptPrintMode,
+      width: receiptWidth,
       device: printerDevice,
       message: detected.device
         ? `Detected printer: ${detected.device}. T sends a test receipt.`
@@ -1270,13 +1666,17 @@ function openSettingsSection(): void {
     };
     settingsSection = "printer";
     inputMode = false;
-    setStatus("Receipt printer — ←/→ print mode, D edit device, T test print.");
+    setStatus("Receipt printer — ↑↓ field, ←/→ option, D device, T test print.");
   } else if (settingsMenuIndex === 2) {
+    settingsSection = "till";
+    inputMode = false;
+    setStatus("Till & stock rules — ↑↓ rule, ←/→ or Space toggles.");
+  } else if (settingsMenuIndex === 3) {
     settingsSection = "shortcuts";
     shortcutIndex = 0;
     inputMode = false;
     setStatus("Shortcuts — Enter remaps, Backspace restores one, R restores all.");
-  } else if (settingsMenuIndex === 3) {
+  } else if (settingsMenuIndex === 4) {
     if (!isAdmin(currentUser.role)) {
       setStatus("Only an Admin can manage user accounts.", "warning");
       updateUI();
@@ -1287,7 +1687,7 @@ function openSettingsSection(): void {
     userIndex = 0;
     inputMode = false;
     setStatus("User accounts — A adds, P resets a PIN, Del removes.");
-  } else if (settingsMenuIndex === 4) {
+  } else if (settingsMenuIndex === 5) {
     settingsSection = "data";
     dataImportMode = false;
     dataMessage = `Export writes products_export.csv · ${products.length} products loaded.`;
@@ -1312,7 +1712,6 @@ function backToSettingsMenu(): void {
   setStatus("Settings — choose a section with ↑↓ and Enter.");
   updateUI();
 }
-
 function saveStoreForm(): void {
   const form = storeForm;
   if (!form) return;
@@ -1342,6 +1741,8 @@ function savePrinterSettings(): void {
   if (!printerForm) return;
   receiptPrintMode = printerForm.mode;
   saveReceiptPrintMode(receiptPrintMode);
+  saveReceiptWidth(printerForm.width);
+  receiptWidth = loadReceiptWidth();
   saveReceiptPrinterDevice(printerForm.device);
   printerDevice = loadReceiptPrinterDevice();
   printerForm.field = 0;
@@ -1349,7 +1750,7 @@ function savePrinterSettings(): void {
   printerForm.message = detected.device
     ? `Saved. Detected printer: ${detected.device}. T sends a test receipt.`
     : `Saved. ${detected.error}`;
-  setStatus(`Receipt printer saved — mode ${receiptPrintMode}.`, "success");
+  setStatus(`Receipt printer saved — mode ${receiptPrintMode}, ${receiptWidth}mm paper.`, "success");
   updateUI();
 }
 
@@ -1357,8 +1758,10 @@ function testPrintReceipt(): void {
   if (!printerForm) return;
   saveReceiptPrinterDevice(printerForm.device);
   printerDevice = loadReceiptPrinterDevice();
+  receiptWidth = printerForm.width;
+  saveReceiptWidth(receiptWidth);
 
-  const subtotal = 9;
+  const subtotal = 9.
   const discount = 0;
   const tax = round2(subtotal * (taxRate / 100));
   const total = round2(subtotal + tax);
@@ -1395,7 +1798,7 @@ function handlePrinterFormKey(key: KeyEvent): void {
   const form = printerForm;
   if (!form) return;
 
-  if (form.field === 1) {
+  if (form.field === 2) {
     if (key.name === "escape") {
       form.field = 0;
       updateUI();
@@ -1426,11 +1829,34 @@ function handlePrinterFormKey(key: KeyEvent): void {
     backToSettingsMenu();
     return;
   }
+
+  // Field cycling between print mode (0), paper width (1) and device (2).
+  const fieldOrder: Array<PrinterForm["field"]> = [0, 1, 2];
   if (key.name === "tab" || key.name === "down" || key.name === "up") {
-    form.field = form.field === 0 ? 1 : 0;
+    const delta = key.name === "up" ? -1 : 1;
+    const current = fieldOrder.indexOf(form.field);
+    form.field = fieldOrder[(current + delta + fieldOrder.length) % fieldOrder.length]!;
+    form.message = form.field === 1 ? "Paper width — ←/→ toggles 80mm and 57mm." : "";
     updateUI();
     return;
   }
+
+  if (form.field === 1) {
+    if (key.name === "left" || key.name === "right" || key.name === "space") {
+      const index = RECEIPT_WIDTHS.findIndex((entry) => entry.width === form.width);
+      const delta = key.name === "left" ? -1 : 1;
+      form.width = RECEIPT_WIDTHS[(index + delta + RECEIPT_WIDTHS.length) % RECEIPT_WIDTHS.length]!.width;
+      form.message = RECEIPT_WIDTHS.find((entry) => entry.width === form.width)!.description;
+      updateUI();
+      return;
+    }
+    if (key.name === "return") {
+      savePrinterSettings();
+      return;
+    }
+    return;
+  }
+
   if (key.name === "left" || key.name === "right" || key.name === "space") {
     const index = PRINT_MODES.findIndex((entry) => entry.mode === form.mode);
     const delta = key.name === "left" ? -1 : 1;
@@ -1450,7 +1876,7 @@ function handlePrinterFormKey(key: KeyEvent): void {
     return;
   }
   if (key.name === "d") {
-    form.field = 1;
+    form.field = 2;
     form.device = printerDevice;
     form.message = "Type the device path (for example /dev/usb/lp0), then Enter.";
     updateUI();
@@ -1899,8 +2325,11 @@ function searchLine(width: number): string {
 function catalogTitle(items: Product[]): string {
   if (currentView === "POS") return ` PRODUCT CATALOGUE (${items.length}) `;
   if (currentView === "INVENTORY") return ` INVENTORY (${products.length}) `;
+  if (currentView === "ITEMS") return ` ITEMS (${ingredients.length}) `;
+  if (currentView === "RECIPES") return ` RECIPES (${products.length}) `;
   if (currentView === "ANALYTICS") return " STORE PERFORMANCE ";
   if (currentView === "SETTINGS") return " SETTINGS ";
+  if (currentView === "TILL") return " TILL & CASH DRAWER ";
   return ` SALES HISTORY (${history.length}) `;
 }
 
@@ -1914,8 +2343,11 @@ function catalogBottomTitle(): string {
       ? " A add · Enter edit · Del delete · R recipe · I ingredients "
       : " A add · Enter edit · Del delete · ↑↓ select ";
   }
+  if (currentView === "ITEMS") return " A add · Enter edit · Del delete · R recipe ";
+  if (currentView === "RECIPES") return " ↑↓ product · Enter edit · Del clear ";
   if (currentView === "ANALYTICS") return " Today / week / all-time · F6 history ";
   if (currentView === "SETTINGS") return " ↑↓ section · Enter open · Esc POS ";
+  if (currentView === "TILL") return " O open · I in · C close · R refresh ";
   return " ↑↓ select · Enter receipt · R reprint · F6 refresh ";
 }
 
@@ -1927,8 +2359,11 @@ function cartTitle(): string {
     if (inventoryMode === "ingredients") return ingredientForm ? " INGREDIENT EDITOR " : " INGREDIENT DETAILS ";
     return productForm ? " PRODUCT EDITOR " : recipeEditor ? " RECIPE EDITOR " : " PRODUCT DETAILS ";
   }
+  if (currentView === "ITEMS") return ingredientForm ? " ITEM EDITOR " : " ITEM DETAILS ";
+  if (currentView === "RECIPES") return recipeEditor ? " RECIPE EDITOR " : " RECIPE DETAILS ";
   if (currentView === "ANALYTICS") return " TOP PRODUCTS & ALERTS ";
   if (currentView === "SETTINGS") return settingsSection === "menu" ? " CONTROL PANEL " : " SETTINGS DETAIL ";
+  if (currentView === "TILL") return " TILL STATUS & SESSIONS ";
   return history[historyIndex] ? ` TRANSACTION #${history[historyIndex]!.id} ` : " TRANSACTION DETAILS ";
 }
 
@@ -1942,8 +2377,11 @@ function cartBottomTitle(): string {
     if (inventoryMode === "ingredients") return ingredientForm ? " Tab next · Ctrl+S save · Esc cancel " : " Enter edit · A add · Del delete ";
     return productForm ? " Tab next · Ctrl+S save · Esc cancel " : recipeEditor ? " ↑↓ ingredient · type qty · Enter save " : " Enter edit · A add · Del delete ";
   }
+  if (currentView === "ITEMS") return ingredientForm ? " Tab next · Ctrl+S save · Esc cancel " : " Enter edit · A add · Del delete ";
+  if (currentView === "RECIPES") return recipeEditor ? " ↑↓ ingredient · type qty · Enter save " : " Enter edit · Del clear ";
   if (currentView === "ANALYTICS") return " Revenue · transactions · payment mix ";
   if (currentView === "SETTINGS") return " Enter open · Esc back · Tab " + bindingLabel(bindings.settings) + " close ";
+  if (currentView === "TILL") return " Enter/↑↓ session · I in · O out · C close (Z) ";
   return " Enter view receipt · R reprint ";
 }
 
@@ -2216,6 +2654,279 @@ function renderInventoryDetails(width: number, rows: number): string[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Items, recipes and till rendering                                   */
+/* ------------------------------------------------------------------ */
+
+function renderItemsList(width: number, rows: number): string[] {
+  const lines: string[] = [];
+  if (ingredients.length === 0) {
+    lines.push(clip("  No items yet.", width));
+    lines.push(clip("  Press A to add milk, syrup, beans…", width));
+    return lines;
+  }
+  const win = listWindow(ingredients.length, itemIndex, rows);
+  if (win.hasAbove) lines.push(overflowLine("up", win.start, width));
+  const nameWidth = Math.max(6, width - 18);
+
+  for (let index = win.start; index < win.end; index += 1) {
+    const ingredient = ingredients[index]!;
+    const marker = index === itemIndex ? "▸" : " ";
+    const low = ingredient.stock <= ingredient.low_stock ? "!" : " ";
+    lines.push(
+      clip(
+        `${marker} ${padColumn(ingredient.name, nameWidth)} ${padColumn(String(ingredient.stock), 8, "right")} ${ingredient.unit}${low}`,
+        width
+      )
+    );
+  }
+  if (win.hasBelow) lines.push(overflowLine("down", ingredients.length - win.end, width));
+  return lines;
+}
+
+function renderItemsDetails(width: number, rows: number): string[] {
+  const form = ingredientForm;
+  if (form) {
+    const lines: string[] = [
+      clip(` ${form.mode === "new" ? "NEW ITEM" : `EDITING #${form.id}`}`, width),
+      clip("─".repeat(width), width),
+    ];
+    INGREDIENT_FIELDS.forEach((label, index) => {
+      const marker = index === form.field ? "▸" : " ";
+      const cursor = index === form.field ? "▌" : "";
+      lines.push(clip(`${marker} ${padColumn(label, 8)}: ${ingredientFormValue(form, index)}${cursor}`, width));
+    });
+    lines.push("");
+    lines.push(clip(" Units: ml, g, pumps, units", width));
+    lines.push(clip(" Ctrl+S save · Esc cancel", width));
+    return lines;
+  }
+
+  const ingredient = ingredients[itemIndex];
+  if (!ingredient) return [clip(" No item selected.", width), clip(" Press A to add one.", width)];
+
+  const usedIn: string[] = [];
+  if (storeType() === "cafe") {
+    for (const product of products) {
+      const line = getRecipesForProduct(product.id).find((entry) => entry.ingredient_id === ingredient.id);
+      if (line) usedIn.push(`${product.name} (${line.quantity}${ingredient.unit})`);
+    }
+  }
+
+  const lines: string[] = [
+    clip(` ${ingredient.name}`, width),
+    clip("─".repeat(width), width),
+    clip(` ID        ${ingredient.id}`, width),
+    clip(` Stock     ${ingredient.stock} ${ingredient.unit}`, width),
+    clip(` Low mark  ${ingredient.low_stock} ${ingredient.unit}`, width),
+    clip(` Status    ${ingredient.stock <= ingredient.low_stock ? "LOW STOCK" : "OK"}`, width),
+    "",
+    clip(" USED IN RECIPES", width),
+  ];
+  if (usedIn.length === 0) lines.push(clip("  Not linked to any product.", width));
+  else for (const entry of usedIn.slice(0, Math.max(2, rows - lines.length - 4))) lines.push(clip(`  ${entry}`, width));
+  lines.push("");
+  lines.push(clip(" Enter / E  edit this item", width));
+  lines.push(clip(" A          add an item", width));
+  lines.push(clip(" R          edit linked recipe", width));
+  lines.push(clip(" Del / X    delete this item", width));
+  return lines.slice(0, Math.max(1, rows));
+}
+
+function renderRecipesList(width: number, rows: number): string[] {
+  const lines: string[] = [];
+  if (storeType() !== "cafe") {
+    lines.push(clip("  Recipes are only used in Coffee Shop / Cafe mode.", width));
+    lines.push(clip("  Change the store type in Settings → Store profile.", width));
+    return lines;
+  }
+  if (products.length === 0) {
+    lines.push(clip("  No products to build recipes for.", width));
+    lines.push(clip("  Add products in the Inventory view first.", width));
+    return lines;
+  }
+
+  const win = listWindow(products.length, recipeIndex, rows);
+  if (win.hasAbove) lines.push(overflowLine("up", win.start, width));
+  const nameWidth = Math.max(8, width - 20);
+  for (let index = win.start; index < win.end; index += 1) {
+    const product = products[index]!;
+    const marker = index === recipeIndex ? "▸" : " ";
+    const count = getRecipesForProduct(product.id).length;
+    const label = count === 0 ? "(none)" : `${count} ingredient${count === 1 ? "" : "s"}`;
+    lines.push(
+      clip(
+        `${marker}${padColumn(`#${product.id}`, 5)} ${padColumn(product.name, nameWidth)} ${label}`,
+        width
+      )
+    );
+  }
+  if (win.hasBelow) lines.push(overflowLine("down", products.length - win.end, width));
+  return lines;
+}
+
+function renderRecipesDetails(width: number, rows: number): string[] {
+  if (recipeEditor) return renderRecipeEditor(width, rows);
+  if (storeType() !== "cafe") {
+    return [
+      clip(" RECIPES", width),
+      clip("─".repeat(width), width),
+      clip(" Switch to Coffee Shop / Cafe mode to use recipes.", width),
+      "",
+      clip(" Settings → Store profile → Type", width),
+    ];
+  }
+  const product = products[recipeIndex];
+  if (!product) return [clip(" No product selected.", width)];
+
+  const recipe = getRecipesForProduct(product.id);
+  const lines: string[] = [
+    clip(` RECIPE · ${product.name}`, width),
+    clip("─".repeat(width), width),
+    clip(` Price     ${money(product.price)}`, width),
+    clip(` Sellable  ${availabilityFor(product.id)}`, width),
+    "",
+    clip(" INGREDIENTS PER SALE", width),
+  ];
+  if (recipe.length === 0) {
+    lines.push(clip("  No recipe yet — this product uses unit stock.", width));
+  } else {
+    for (const line of recipe.slice(0, Math.max(2, rows - lines.length - 5))) {
+      lines.push(clip(`  ${padColumn(line.name, Math.max(8, width - 16))} ${line.quantity}${line.unit}`, width));
+    }
+  }
+  lines.push("");
+  lines.push(clip(" Enter / E  edit this recipe", width));
+  lines.push(clip(" Del / X    clear the recipe", width));
+  lines.push(clip(" ↑↓         pick a product", width));
+  return lines.slice(0, Math.max(1, rows));
+}
+
+function renderTillPanel(width: number, rows: number): string[] {
+  const form = tillForm;
+  if (form) {
+    const labels: Record<TillForm["mode"], string> = {
+      open: "OPEN TILL · OPENING FLOAT",
+      close: "CLOSE TILL · COUNTED CASH",
+      in: "CASH IN",
+      out: "CASH OUT",
+    };
+    const lines: string[] = [clip(` ${labels[form.mode]}`, width), clip("─".repeat(width), width)];
+    const amountCursor = form.field === 0 ? "▌" : "";
+    const reasonCursor = form.field === 1 ? "▌" : "";
+    lines.push(clip(`${form.field === 0 ? "▸" : " "} Amount  ${money(Number.parseFloat(form.amount || "0"))}${amountCursor}`, width));
+    lines.push(clip(`${form.field === 1 ? "▸" : " "} Note    ${form.reason}${reasonCursor}`, width));
+    if (form.mode === "open") {
+      lines.push("");
+      lines.push(clip(" Count the starting cash in the drawer.", width));
+    } else if (form.mode === "close") {
+      lines.push("");
+      lines.push(clip(" Count all cash in the drawer to close.", width));
+    }
+    lines.push("");
+    lines.push(clip(" Tab / ↑↓  move · Enter confirm · Esc cancel", width));
+    return lines.slice(0, Math.max(1, rows));
+  }
+
+  const lines: string[] = [clip(" TILL STATUS", width), clip("─".repeat(width), width)];
+  if (tillSession) {
+    const report = getTillReport(tillSession.id);
+    lines.push(clip(` #${tillSession.id}  OPEN   by ${tillSession.opened_by}`, width));
+    lines.push(clip(` Opened     ${timestampLabel(tillSession.opened_at)}`, width));
+    lines.push(clip(` Float      ${money(tillSession.opening_float)}`, width));
+    if (report) {
+      lines.push(clip(` Sales      ${report.salesCount} · ${money(report.grossSales)}`, width));
+      lines.push(clip(` Cash       ${money(report.cashSales)}   Card ${money(report.cardSales)}`, width));
+      lines.push(clip(` In / Out   ${money(report.movementsIn)} / ${money(report.movementsOut)}`, width));
+      lines.push(clip(` Expected   ${money(report.expectedCash)} cash in drawer`, width));
+    }
+    lines.push("");
+    lines.push(clip(" CASH MOVEMENTS (this session)", width));
+    if (tillMovements.length === 0) lines.push(clip("  None recorded.", width));
+    else {
+      for (const movement of tillMovements.slice(-Math.max(2, rows - lines.length - 6))) {
+        const sign = movement.kind === "in" ? "+" : "-";
+        lines.push(
+          clip(`  ${padColumn(timestampLabel(movement.created_at), 17)} ${sign}${padColumn(money(movement.amount), 9, "right")}  ${movement.reason}`, width)
+        );
+      }
+    }
+    lines.push("");
+    lines.push(clip(" I cash in · O cash out · C close (Z) · R refresh", width));
+  } else {
+    lines.push(clip(" CLOSED — no open till session", width));
+    lines.push("");
+    lines.push(clip(" O  open the till (opening float)", width));
+    lines.push(clip(" R  refresh", width));
+  }
+
+  lines.push("");
+  lines.push(clip(" RECENT TILLS", width));
+  if (tillSessions.length === 0) {
+    lines.push(clip("  No till sessions yet.", width));
+  } else {
+    for (let index = 0; index < Math.min(tillSessions.length, Math.max(2, rows - lines.length - 2)); index += 1) {
+      const session = tillSessions[index]!;
+      const marker = index === tillIndex ? "▸" : " ";
+      const state = session.closed_at ? "closed" : "OPEN";
+      const counted = session.closing_count === null ? "" : ` · counted ${money(session.closing_count)}`;
+      lines.push(
+        clip(`${marker}#${padColumn(String(session.id), 3)} ${padColumn(timestampLabel(session.opened_at), 17)} ${padColumn(state, 7)}${counted}`, width)
+      );
+    }
+  }
+  return lines.slice(0, Math.max(1, rows));
+}
+
+/** X/Z report for a selected session, shown in the right-hand panel. */
+function renderTillReport(width: number, rows: number): string[] {
+  const selected = tillSessions[tillIndex];
+  if (!selected) {
+    return [
+      clip(" SESSION REPORT", width),
+      clip("─".repeat(width), width),
+      clip(" No till session selected.", width),
+      "",
+      clip(" Open the till with O.", width),
+    ];
+  }
+
+  const report = getTillReport(selected.id);
+  if (!report) return [clip(" No report available.", width)];
+
+  const kind = selected.closed_at ? "Z REPORT (CLOSED)" : "X REPORT (OPEN)";
+  const lines: string[] = [
+    clip(` ${kind} · #${selected.id}`, width),
+    clip("─".repeat(width), width),
+    clip(` Opened     ${timestampLabel(selected.opened_at)} by ${selected.opened_by}`, width),
+    clip(` Closed     ${selected.closed_at ? `${timestampLabel(selected.closed_at)} by ${selected.closed_by ?? "—"}` : "—"}`, width),
+    "",
+    clip(` Float      ${money(report.session.opening_float)}`, width),
+    clip(` Sales      ${report.salesCount} · ${money(report.grossSales)}`, width),
+    clip(` Cash       ${money(report.cashSales)}`, width),
+    clip(` Card       ${money(report.cardSales)}`, width),
+    clip(` Other      ${money(report.otherSales)}`, width),
+    clip(` Cash in    ${money(report.movementsIn)}`, width),
+    clip(` Cash out   ${money(report.movementsOut)}`, width),
+    clip(` Expected   ${money(report.expectedCash)}`, width),
+  ];
+  if (report.countedCash !== null) {
+    lines.push(clip(` Counted    ${money(report.countedCash)}`, width));
+    const variance = report.variance ?? 0;
+    lines.push(clip(` Variance   ${variance >= 0 ? "+" : ""}${money(variance)}`, width));
+  } else {
+    lines.push(clip(" Counted    (till still open)", width));
+  }
+  if (selected.notes) {
+    lines.push("");
+    lines.push(clip(" NOTES", width));
+    for (const row of wrapText(selected.notes, Math.max(10, width))) lines.push(clip(` ${row}`, width));
+  }
+  lines.push("");
+  lines.push(clip(" O open new · C close (Z) · R refresh", width));
+  return lines.slice(0, Math.max(1, rows));
+}
+
+/* ------------------------------------------------------------------ */
 /* History and analytics rendering                                     */
 /* ------------------------------------------------------------------ */
 
@@ -2415,22 +3126,59 @@ function renderSettingsDetail(width: number, rows: number): string[] {
     const form = printerForm;
     const detected = detectPrinterDevice(form.device);
     const lines: string[] = [clip(" RECEIPT PRINTER", width), clip("─".repeat(width), width)];
+    lines.push(clip(" Print mode", width));
     PRINT_MODES.forEach((entry, index) => {
-      const marker = entry.mode === form.mode ? "▸" : " ";
+      const marker = form.field === 0 && entry.mode === form.mode ? "▸" : " ";
       lines.push(clip(`${marker} ${index + 1}. ${padColumn(entry.label, 18)} ${entry.description}`, width));
     });
     lines.push("");
-    const deviceCursor = form.field === 1 ? "▌" : "";
-    const deviceValue = form.field === 1 ? form.device : printerDevice;
-    lines.push(clip(`${form.field === 1 ? "▸" : " "} Device   ${deviceValue || "(auto-detect)"}${deviceCursor}`, width));
+    lines.push(clip(" Paper width", width));
+    RECEIPT_WIDTHS.forEach((entry) => {
+      const marker = form.field === 1 && entry.width === form.width ? "▸" : " ";
+      lines.push(clip(`${marker} ${padColumn(entry.label, 18)} ${entry.description}`, width));
+    });
+    lines.push("");
+    const deviceCursor = form.field === 2 ? "▌" : "";
+    const deviceValue = form.field === 2 ? form.device : printerDevice;
+    lines.push(clip(`${form.field === 2 ? "▸" : " "} Device   ${deviceValue || "(auto-detect)"}${deviceCursor}`, width));
     lines.push(clip(`  Status   ${detected.device ?? detected.error ?? "auto-detect on print"}`, width));
     lines.push("");
-    if (form.field === 1) lines.push(clip(" TYPE device path · Enter save · Ctrl+U clear · Esc back", width));
-    else lines.push(clip(" ←/→ or 1/2/3 mode · D device · T test print · Enter save · Esc", width));
+    if (form.field === 2) lines.push(clip(" TYPE device path · Enter save · Ctrl+U clear · Esc back", width));
+    else lines.push(clip(" ↑↓ field · ←/→ or 1/2/3 · D device · T test · Enter save", width));
     if (form.message) {
       lines.push("");
       for (const row of wrapText(form.message, Math.max(10, width))) lines.push(clip(row, width));
     }
+    return lines.slice(0, Math.max(1, rows));
+  }
+
+  if (settingsSection === "till") {
+    const lines: string[] = [clip(" TILL & STOCK RULES", width), clip("─".repeat(width), width)];
+    const rules = [
+      {
+        title: "Allow sale without a till",
+        detail: allowSaleWithoutTill
+          ? "Sales proceed even when no till is open."
+          : "A till must be open before checkout.",
+        value: allowSaleWithoutTill,
+      },
+      {
+        title: "Allow negative selling",
+        detail: allowNegativeStock
+          ? "Overselling warns but is allowed; stock can go negative."
+          : "Overselling is blocked.",
+        value: allowNegativeStock,
+      },
+    ];
+    rules.forEach((rule, index) => {
+      const marker = index === settingsRuleIndex ? "▸" : " ";
+      lines.push(clip(`${marker} ${padColumn(rule.title, 26)} ${rule.value ? "[ ON  ]" : "[ OFF ]"}`, width));
+      if (index === settingsRuleIndex) lines.push(clip(`    ${rule.detail}`, width));
+    });
+    lines.push("");
+    lines.push(clip(` Till now: ${tillSession ? `OPEN #${tillSession.id} (float ${money(tillSession.opening_float)})` : "CLOSED"}`, width));
+    lines.push("");
+    lines.push(clip(" ↑↓ rule · Space/←/→ toggle · Esc back", width));
     return lines.slice(0, Math.max(1, rows));
   }
 
@@ -2528,13 +3276,15 @@ function wrapText(value: string, width: number): string[] {
 function keysHint(): string {
   if (modal) return " [Esc] close ";
   if (shortcutCapture) return " PRESS NEW KEY · Esc cancels ";
+  if (tillForm) return " TYPE amount · Tab note · Enter confirm · Esc cancel ";
   if (currentView === "SETTINGS") {
     if (dataImportMode) return " TYPE path · Enter import · Esc cancel ";
     if (userForm) return " TYPE · Tab next · Ctrl+S save · Esc cancel ";
     if (storeForm) return " Tab field · ←/→ type · Ctrl+S save · Esc cancel ";
     if (settingsSection === "shortcuts") return " ↑↓ action · Enter remap · Backspace default · R all · Esc ";
-    if (settingsSection === "printer" && printerForm?.field === 1) return " TYPE device · Enter save · Ctrl+U clear · Esc ";
-    if (settingsSection === "printer") return " ←/→ mode · D device · T test · Enter save · Esc ";
+    if (settingsSection === "till") return " ↑↓ rule · Space/←/→ toggle · Esc back ";
+    if (settingsSection === "printer" && printerForm?.field === 2) return " TYPE device · Enter save · Ctrl+U clear · Esc ";
+    if (settingsSection === "printer") return " ↑↓ field · ←/→ option · D device · T test · Enter save · Esc ";
     if (settingsSection === "users") return " ↑↓ user · A add · P PIN · Del remove · Esc back ";
     if (settingsSection === "data") return " E export · I import · Esc back ";
     return " ↑↓ section · Enter open · Esc POS · F1 POS · F5 theme ";
@@ -2557,6 +3307,9 @@ function keysHint(): string {
     if (inventoryMode === "ingredients") return ` A add · Enter edit · Del delete · I back · F1 POS · ${bindingLabel(bindings.logout)} sign out `;
     return ` A add · Enter edit · Del delete${storeType() === "cafe" ? " · R recipe · I ingredients" : ""} · F1 POS · ${bindingLabel(bindings.logout)} sign out `;
   }
+  if (currentView === "ITEMS") return ` A add · Enter edit · Del delete · R recipe · ↑↓ pick · F1 POS · ${bindingLabel(bindings.logout)} `;
+  if (currentView === "RECIPES") return ` ↑↓ product · Enter edit · Del clear · F1 POS · ${bindingLabel(bindings.logout)} sign out `;
+  if (currentView === "TILL") return " O open · I cash in · C close (Z) · R refresh · ↑↓ sessions · F1 POS ";
   if (currentView === "ANALYTICS") return ` F1 POS · F2 inventory · F3 analytics · F4 settings · F6 history · ${bindingLabel(bindings.logout)} sign out · Q `;
   return ` F1 POS · F2 inventory · F3 analytics · F4 settings · Enter receipt · R reprint · ${bindingLabel(bindings.logout)} sign out · Q `;
 }
@@ -2596,15 +3349,29 @@ function helpLines(): string[] {
     "  Del   Delete product       I          Ingredients",
     "  R     Edit recipe (Cafe)   Ctrl+S     Save form",
     "",
+    "ITEMS (Manager / Admin)",
+    "  A     Add item (milk, syrup, beans…)   Enter / E  Edit",
+    "  Del   Delete item          R          Edit linked recipe",
+    "",
+    "RECIPES (Manager / Admin, Cafe mode)",
+    "  ↑↓    Pick product         Enter / E  Edit recipe",
+    "  Del   Clear the recipe",
+    "",
+    "TILL / CASH DRAWER (Manager / Admin)",
+    "  O     Open the till (opening float)",
+    "  I     Cash in              C          Close till (Z report)",
+    "  R     Refresh              ↑↓         Browse sessions",
+    "",
     "ANALYTICS (Manager / Admin)",
     "  F3    Revenue, transactions, payment mix, top sellers",
     "",
     "SETTINGS (Manager / Admin)",
-    "  F4    Store profile, printer, shortcuts, users, import/export",
+    "  F4    Store profile, printer, till rules, shortcuts, users",
     "  P     Print the open receipt",
     "  Remapped printable shortcuts work in nav mode.",
     "",
-    "Receipts append to receipts.log and receipts.escpos.log (42 columns).",
+    "Receipts append to receipts.log and receipts.escpos.log.",
+    "Paper width is chosen in Settings: 80mm (42 col) or 57mm (32 col).",
   ];
 }
 
@@ -2859,7 +3626,7 @@ function updateUI(): void {
   headerTitle.fg = activeTheme.background;
   headerTitle.width = headerInner;
 
-  const editingForm = Boolean(productForm || ingredientForm || recipeEditor || storeForm || userForm || dataImportMode);
+  const editingForm = Boolean(productForm || ingredientForm || recipeEditor || storeForm || userForm || dataImportMode || tillForm);
   const modeLabel = editingForm ? "EDIT" : inputMode ? "INSERT" : "NAV";
   let headerRight = `${modeLabel} · ${currentUser?.role ?? "—"}:${currentUser?.username ?? "—"} · ${activeTheme.name}`;
   const todayLabel = `Today ${todayStats.count}/${money(todayStats.revenue)}`;
@@ -2893,10 +3660,12 @@ function updateUI(): void {
   const catalogFocused =
     (currentView === "POS" && (focus === "CATALOG" || focus === "SEARCH")) ||
     currentView === "INVENTORY" ||
+    currentView === "ITEMS" ||
+    currentView === "RECIPES" ||
     currentView === "HISTORY" ||
     currentView === "ANALYTICS" ||
     (currentView === "SETTINGS" && settingsSection === "menu");
-  const cartFocused = currentView === "POS" && focus === "CART";
+  const cartFocused = (currentView === "POS" && focus === "CART") || currentView === "TILL";
 
   catalogBox.backgroundColor = activeTheme.surface;
   catalogBox.borderColor = catalogFocused ? activeTheme.secondary : activeTheme.border;
@@ -2921,12 +3690,21 @@ function updateUI(): void {
   } else if (currentView === "INVENTORY") {
     leftLines = renderInventoryList(catalogInner, contentRows);
     rightLines = renderInventoryDetails(cartInner, contentRows);
+  } else if (currentView === "ITEMS") {
+    leftLines = renderItemsList(catalogInner, contentRows);
+    rightLines = renderItemsDetails(cartInner, contentRows);
+  } else if (currentView === "RECIPES") {
+    leftLines = renderRecipesList(catalogInner, contentRows);
+    rightLines = renderRecipesDetails(cartInner, contentRows);
   } else if (currentView === "HISTORY") {
     leftLines = renderHistoryList(catalogInner, contentRows);
     rightLines = renderHistoryDetails(cartInner, contentRows);
   } else if (currentView === "ANALYTICS") {
     leftLines = renderAnalyticsSummary(catalogInner, contentRows);
     rightLines = renderAnalyticsDetails(cartInner, contentRows);
+  } else if (currentView === "TILL") {
+    leftLines = renderTillPanel(catalogInner, contentRows);
+    rightLines = renderTillReport(cartInner, contentRows);
   } else {
     leftLines = renderSettingsMenu(catalogInner, contentRows);
     rightLines = renderSettingsDetail(cartInner, contentRows);
@@ -3009,6 +3787,13 @@ function handleModalKey(key: KeyEvent): void {
       } else if (current.action === "delete-ingredient" && current.ingredientId !== undefined) {
         executeDeleteIngredient(current.ingredientId);
         updateUI();
+      } else if (current.action === "delete-recipe" && current.productId !== undefined) {
+        executeDeleteRecipe(current.productId);
+        updateUI();
+      } else if (current.action === "oversell") {
+        openPaymentModal();
+      } else if (current.action === "close-till") {
+        openTillForm("close");
       } else if (current.action === "delete-user" && current.userId !== undefined) {
         executeDeleteUser(current.userId);
         updateUI();
@@ -3506,6 +4291,37 @@ function handleSettingsKey(key: KeyEvent): void {
     return;
   }
 
+  if (settingsSection === "till") {
+    if (key.name === "escape") {
+      backToSettingsMenu();
+      return;
+    }
+    if (key.name === "up" || key.name === "down") {
+      settingsRuleIndex = (settingsRuleIndex + (key.name === "up" ? -1 : 1) + 2) % 2;
+      updateUI();
+      return;
+    }
+    if (key.name === "space" || key.name === "left" || key.name === "right" || key.name === "return") {
+      if (settingsRuleIndex === 0) {
+        allowSaleWithoutTill = !allowSaleWithoutTill;
+        saveAllowSaleWithoutTill(allowSaleWithoutTill);
+        setStatus(
+          `Sales without an open till are now ${allowSaleWithoutTill ? "allowed" : "blocked"}.`,
+          "success"
+        );
+      } else {
+        allowNegativeStock = !allowNegativeStock;
+        saveAllowNegativeStock(allowNegativeStock);
+        setStatus(
+          `Negative selling (oversell) is now ${allowNegativeStock ? "allowed" : "blocked"}.`,
+          "success"
+        );
+      }
+      updateUI();
+    }
+    return;
+  }
+
   if (settingsSection === "printer" && printerForm) {
     handlePrinterFormKey(key);
     return;
@@ -3612,6 +4428,127 @@ function handleInventoryKey(key: KeyEvent): void {
   }
 }
 
+function handleItemsKey(key: KeyEvent): void {
+  if (ingredientForm) {
+    handleIngredientFormKey(key);
+    return;
+  }
+
+  if (key.name === "q") quitApp();
+
+  if (key.name === "escape") {
+    switchView("POS");
+    return;
+  }
+  if (key.name === "up" || key.name === "down") {
+    itemIndex = clamp(itemIndex + (key.name === "up" ? -1 : 1), 0, Math.max(0, ingredients.length - 1));
+    updateUI();
+    return;
+  }
+  if (key.name === "a") {
+    openIngredientForm("new");
+    return;
+  }
+  if (key.name === "return" || key.name === "e") {
+    openIngredientForm("edit");
+    return;
+  }
+  if (key.name === "delete" || key.name === "x") {
+    openDeleteIngredientConfirm();
+    updateUI();
+    return;
+  }
+  if (key.name === "r") {
+    const ingredient = ingredients[itemIndex];
+    if (!ingredient) {
+      setStatus("Select an item first.", "warning");
+      updateUI();
+      return;
+    }
+    const product = products.find((candidate) =>
+      getRecipesForProduct(candidate.id).some((line) => line.ingredient_id === ingredient.id)
+    );
+    if (!product) {
+      setStatus(`${ingredient.name} is not linked to any product recipe yet.`, "warning");
+      updateUI();
+      return;
+    }
+    recipeIndex = Math.max(0, products.findIndex((candidate) => candidate.id === product.id));
+    openRecipeEditor();
+  }
+}
+
+function handleRecipesKey(key: KeyEvent): void {
+  if (recipeEditor) {
+    handleRecipeEditorKey(key);
+    return;
+  }
+
+  if (key.name === "q") quitApp();
+
+  if (key.name === "escape") {
+    switchView("POS");
+    return;
+  }
+  if (key.name === "up" || key.name === "down") {
+    recipeIndex = clamp(recipeIndex + (key.name === "up" ? -1 : 1), 0, Math.max(0, products.length - 1));
+    updateUI();
+    return;
+  }
+  if (key.name === "return" || key.name === "e") {
+    openRecipeEditor();
+    return;
+  }
+  if (key.name === "delete" || key.name === "x") {
+    deleteRecipeForSelectedProduct();
+    updateUI();
+  }
+}
+
+function handleTillKey(key: KeyEvent): void {
+  if (key.name === "q") quitApp();
+
+  if (key.name === "escape") {
+    switchView("POS");
+    return;
+  }
+  if (key.name === "r") {
+    refreshTill();
+    setStatus(
+      tillSession ? `Till #${tillSession.id} refreshed.` : "Till refreshed — currently closed.",
+      "info"
+    );
+    updateUI();
+    return;
+  }
+  if (key.name === "up" || key.name === "down") {
+    tillIndex = clamp(tillIndex + (key.name === "up" ? -1 : 1), 0, Math.max(0, tillSessions.length - 1));
+    updateUI();
+    return;
+  }
+  if (key.name === "o") {
+    if (tillSession) {
+      setStatus(`Till #${tillSession.id} is already open. Press C to close it first.`, "warning");
+      updateUI();
+      return;
+    }
+    openTillForm("open");
+    return;
+  }
+  if (key.name === "i") {
+    openTillForm("in");
+    return;
+  }
+  if (key.name === "c") {
+    openCloseTillConfirm();
+    return;
+  }
+  if (key.name === "return") {
+    if (tillSession) openTillForm("out");
+    else openTillForm("open");
+  }
+}
+
 function handleSearchKey(key: KeyEvent): void {
   if (key.name === "escape") {
     inputMode = false;
@@ -3686,12 +4623,16 @@ function tryGlobalNavigation(key: KeyEvent): boolean {
     storeForm !== null ||
     printerForm !== null ||
     userForm !== null ||
+    tillForm !== null ||
     dataImportMode ||
     shortcutCapture !== null;
   if (editing && !/^f\d+$/.test(token)) return false;
   if (
     editing &&
     (action === "inventory" ||
+      action === "items" ||
+      action === "recipes" ||
+      action === "till" ||
       action === "analytics" ||
       action === "settings" ||
       action === "history" ||
@@ -3707,6 +4648,18 @@ function tryGlobalNavigation(key: KeyEvent): boolean {
 
   if (action === "inventory") {
     switchView("INVENTORY");
+    return true;
+  }
+  if (action === "items") {
+    switchView("ITEMS");
+    return true;
+  }
+  if (action === "recipes") {
+    switchView("RECIPES");
+    return true;
+  }
+  if (action === "till") {
+    switchView("TILL");
     return true;
   }
   if (action === "analytics") {
@@ -3931,6 +4884,11 @@ renderer.keyInput.on("keypress", (key) => {
     return;
   }
 
+  if (tillForm) {
+    handleTillFormKey(key);
+    return;
+  }
+
   if (matchesBinding(key, "help")) {
     openHelp();
     return;
@@ -3940,6 +4898,18 @@ renderer.keyInput.on("keypress", (key) => {
 
   if (currentView === "INVENTORY") {
     handleInventoryKey(key);
+    return;
+  }
+  if (currentView === "ITEMS") {
+    handleItemsKey(key);
+    return;
+  }
+  if (currentView === "RECIPES") {
+    handleRecipesKey(key);
+    return;
+  }
+  if (currentView === "TILL") {
+    handleTillKey(key);
     return;
   }
   if (currentView === "SETTINGS") {

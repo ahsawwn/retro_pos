@@ -43,6 +43,42 @@ export interface TransactionRecord {
   amount_tendered: number;
   change_due: number;
   items_json: string;
+  till_session_id: number | null;
+}
+
+export interface TillSession {
+  id: number;
+  opened_at: string;
+  opened_by: string;
+  opening_float: number;
+  closed_at: string | null;
+  closed_by: string | null;
+  closing_count: number | null;
+  notes: string;
+}
+
+export interface TillMovement {
+  id: number;
+  session_id: number;
+  kind: "in" | "out";
+  amount: number;
+  reason: string;
+  created_at: string;
+  created_by: string;
+}
+
+export interface TillReport {
+  session: TillSession;
+  salesCount: number;
+  grossSales: number;
+  cashSales: number;
+  cardSales: number;
+  otherSales: number;
+  movementsIn: number;
+  movementsOut: number;
+  expectedCash: number;
+  countedCash: number | null;
+  variance: number | null;
 }
 
 export interface TransactionStats {
@@ -115,6 +151,8 @@ export interface SaleInput {
   cashierName: string;
   amountTendered: number;
   changeDue: number;
+  tillSessionId?: number | null;
+  allowNegative?: boolean;
 }
 
 export interface PaymentBreakdown {
@@ -161,7 +199,7 @@ db.exec("PRAGMA foreign_keys = ON;");
 const PRODUCT_COLUMNS = "id, name, barcode, price, stock, category_id";
 const TRANSACTION_COLUMNS =
   "id, timestamp, subtotal, discount_amount, tax_amount, tax_rate, total_amount, " +
-  "payment_method, cashier_id, cashier_name, amount_tendered, change_due, items_json";
+  "payment_method, cashier_id, cashier_name, amount_tendered, change_due, items_json, till_session_id";
 
 /* ------------------------------------------------------------------ */
 /* Schema                                                              */
@@ -179,6 +217,7 @@ function migrateLegacyTransactions(): void {
     ["cashier_name", "TEXT NOT NULL DEFAULT 'Legacy'"],
     ["amount_tendered", "REAL NOT NULL DEFAULT 0"],
     ["change_due", "REAL NOT NULL DEFAULT 0"],
+    ["till_session_id", "INTEGER"],
   ];
 
   for (const [name, definition] of additions) {
@@ -271,9 +310,32 @@ export function initDb(): void {
       FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS till_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      opened_at TEXT NOT NULL,
+      opened_by TEXT NOT NULL DEFAULT 'Cashier',
+      opening_float REAL NOT NULL DEFAULT 0,
+      closed_at TEXT,
+      closed_by TEXT,
+      closing_count REAL,
+      notes TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS till_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('in', 'out')),
+      amount REAL NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL DEFAULT 'Cashier',
+      FOREIGN KEY (session_id) REFERENCES till_sessions(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
     CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_product_recipes_product ON product_recipes(product_id);
+    CREATE INDEX IF NOT EXISTS idx_till_movements_session ON till_movements(session_id);
   `);
 
   migrateLegacyProducts();
@@ -594,6 +656,132 @@ export function getLowStockProducts(threshold = 5): Product[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Till sessions and cash drawer                                       */
+/* ------------------------------------------------------------------ */
+
+const TILL_SESSION_COLUMNS =
+  "id, opened_at, opened_by, opening_float, closed_at, closed_by, closing_count, notes";
+
+export function getOpenTillSession(): TillSession | null {
+  return (
+    (db
+      .query(`SELECT ${TILL_SESSION_COLUMNS} FROM till_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1`)
+      .get() as TillSession | null) ?? null
+  );
+}
+
+export function getTillSessionById(id: number): TillSession | null {
+  return (
+    (db.query(`SELECT ${TILL_SESSION_COLUMNS} FROM till_sessions WHERE id = ?`).get(id) as TillSession | null) ?? null
+  );
+}
+
+export function getRecentTillSessions(limit = 50): TillSession[] {
+  const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+  return db
+    .query(`SELECT ${TILL_SESSION_COLUMNS} FROM till_sessions ORDER BY id DESC LIMIT ?`)
+    .all(safeLimit) as TillSession[];
+}
+
+export function openTillSession(openingFloat: number, openedBy: string, notes = ""): number {
+  if (!Number.isFinite(openingFloat) || openingFloat < 0) throw new Error("Opening float cannot be negative.");
+  if (getOpenTillSession()) throw new Error("A till session is already open. Close it before opening a new one.");
+
+  const result = db
+    .query("INSERT INTO till_sessions (opened_at, opened_by, opening_float, notes) VALUES (?, ?, ?, ?)")
+    .run(new Date().toISOString(), openedBy, openingFloat, notes.trim());
+  return Number(result.lastInsertRowid);
+}
+
+export function closeTillSession(id: number, closingCount: number, closedBy: string, notes = ""): void {
+  if (!Number.isFinite(closingCount)) throw new Error("Counted cash must be a number.");
+  const session = getTillSessionById(id);
+  if (!session) throw new Error("Till session not found.");
+  if (session.closed_at) throw new Error("Till session is already closed.");
+
+  const existingNotes = session.notes.trim();
+  const mergedNotes = notes.trim() ? (existingNotes ? `${existingNotes} · ${notes.trim()}` : notes.trim()) : existingNotes;
+
+  db.query(
+    "UPDATE till_sessions SET closed_at = ?, closed_by = ?, closing_count = ?, notes = ? WHERE id = ?"
+  ).run(new Date().toISOString(), closedBy, closingCount, mergedNotes, id);
+}
+
+export function addTillMovement(sessionId: number, kind: "in" | "out", amount: number, reason: string, createdBy: string): void {
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Amount must be greater than zero.");
+  const session = getTillSessionById(sessionId);
+  if (!session) throw new Error("Till session not found.");
+  if (session.closed_at) throw new Error("Cannot add a cash movement to a closed till.");
+
+  db.query(
+    "INSERT INTO till_movements (session_id, kind, amount, reason, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(sessionId, kind, amount, reason.trim(), new Date().toISOString(), createdBy);
+}
+
+export function getTillMovements(sessionId: number): TillMovement[] {
+  return db
+    .query(
+      "SELECT id, session_id, kind, amount, reason, created_at, created_by FROM till_movements WHERE session_id = ? ORDER BY id"
+    )
+    .all(sessionId) as TillMovement[];
+}
+
+/** Aggregate a session into an X or Z report. Counted cash is null while open. */
+export function getTillReport(sessionId: number): TillReport | null {
+  const session = getTillSessionById(sessionId);
+  if (!session) return null;
+
+  const sales = db
+    .query(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS gross
+       FROM transactions WHERE till_session_id = ?`
+    )
+    .get(sessionId) as { count: number; gross: number };
+
+  const byMethod = db
+    .query(
+      `SELECT payment_method AS method, COALESCE(SUM(total_amount), 0) AS amount
+       FROM transactions WHERE till_session_id = ? GROUP BY payment_method`
+    )
+    .all(sessionId) as { method: string; amount: number }[];
+
+  const movements = db
+    .query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN kind = 'in' THEN amount ELSE 0 END), 0) AS total_in,
+         COALESCE(SUM(CASE WHEN kind = 'out' THEN amount ELSE 0 END), 0) AS total_out
+       FROM till_movements WHERE session_id = ?`
+    )
+    .get(sessionId) as { total_in: number; total_out: number };
+
+  const amountFor = (name: string): number => byMethod.find((row) => row.method === name)?.amount ?? 0;
+  const cashSales = amountFor("Cash");
+  const cardSales = amountFor("Card");
+  const otherSales = round2(sales.gross - cashSales - cardSales);
+  const expectedCash = round2(session.opening_float + cashSales + movements.total_in - movements.total_out);
+  const countedCash = session.closing_count;
+  const variance = countedCash === null ? null : round2(countedCash - expectedCash);
+
+  return {
+    session,
+    salesCount: sales.count,
+    grossSales: round2(sales.gross),
+    cashSales: round2(cashSales),
+    cardSales: round2(cardSales),
+    otherSales,
+    movementsIn: round2(movements.total_in),
+    movementsOut: round2(movements.total_out),
+    expectedCash,
+    countedCash,
+    variance,
+  };
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/* ------------------------------------------------------------------ */
 /* Transactions                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -620,7 +808,14 @@ function ingredientRequirements(items: CartItem[]): Map<number, { needed: number
 }
 
 /** Validate a cart against live stock without changing anything. */
-export function validateSale(items: CartItem[], storeType: StoreType): string | null {
+export function validateSale(items: CartItem[], storeType: StoreType, allowNegative = false): string | null {
+  if (allowNegative) {
+    for (const item of items) {
+      if (!getProductById(item.id)) return `${item.name} no longer exists in the catalogue.`;
+    }
+    return null;
+  }
+
   for (const item of items) {
     const product = getProductById(item.id);
     if (!product) return `${item.name} no longer exists in the catalogue.`;
@@ -656,15 +851,15 @@ export function recordTransaction(input: SaleInput): number {
   const timestamp = new Date().toISOString();
 
   const writeSale = db.transaction(() => {
-    const stockError = validateSale(input.items, storeType);
+    const stockError = validateSale(input.items, storeType, input.allowNegative ?? false);
     if (stockError) throw new Error(stockError);
 
     const result = db
       .query(
         `INSERT INTO transactions
          (timestamp, subtotal, discount_amount, tax_amount, tax_rate, total_amount, payment_method,
-          cashier_id, cashier_name, amount_tendered, change_due, items_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          cashier_id, cashier_name, amount_tendered, change_due, items_json, till_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         timestamp,
@@ -678,11 +873,21 @@ export function recordTransaction(input: SaleInput): number {
         input.cashierName,
         input.amountTendered,
         input.changeDue,
-        JSON.stringify(input.items)
+        JSON.stringify(input.items),
+        input.tillSessionId ?? null
       );
 
-    const deductProduct = db.query("UPDATE products SET stock = MAX(0, stock - ?) WHERE id = ?");
-    const deductIngredient = db.query("UPDATE ingredients SET stock = MAX(0, stock - ?) WHERE id = ?");
+    const allowNegative = input.allowNegative ?? false;
+    const deductProduct = db.query(
+      allowNegative
+        ? "UPDATE products SET stock = stock - ? WHERE id = ?"
+        : "UPDATE products SET stock = MAX(0, stock - ?) WHERE id = ?"
+    );
+    const deductIngredient = db.query(
+      allowNegative
+        ? "UPDATE ingredients SET stock = stock - ? WHERE id = ?"
+        : "UPDATE ingredients SET stock = MAX(0, stock - ?) WHERE id = ?"
+    );
 
     if (storeType === "cafe") {
       for (const item of input.items) {
@@ -704,8 +909,7 @@ export function recordTransaction(input: SaleInput): number {
 }
 
 /** Most recent sales first. History is intentionally capped for terminal speed. */
-export function getRecentTransactions(limit = 100): TransactionRecord[] {
-  const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+export function getRecentTransactions(limit = 100): TransactionRecord[] {  const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
   return db
     .query(
       `SELECT ${TRANSACTION_COLUMNS}
