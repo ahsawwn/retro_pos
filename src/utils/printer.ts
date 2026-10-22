@@ -1,50 +1,108 @@
+import { appendFileSync } from "node:fs";
+
+/**
+ * Receipt formatting and persistence.
+ *
+ * The rendered receipt is deliberately plain ASCII so it can be dropped into an
+ * ESC/POS printer driver, a console overlay, or the on-disk receipt journal
+ * without any terminal escape sequences.
+ */
+
 export interface ReceiptItem {
   name: string;
   price: number;
   qty: number;
 }
 
+export interface ReceiptOptions {
+  transactionId?: number;
+  paymentMethod?: string;
+  discountPercent?: number;
+  date?: Date;
+}
+
+const WIDTH = 44;
+const DEFAULT_RECEIPT_LOG = "receipts.log";
+
+function line(char = "-"): string {
+  return char.repeat(WIDTH);
+}
+
+function center(value: string): string {
+  const text = value.slice(0, WIDTH);
+  const left = Math.max(0, Math.floor((WIDTH - text.length) / 2));
+  return `${" ".repeat(left)}${text}`.padEnd(WIDTH);
+}
+
+function money(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function twoColumn(label: string, value: string): string {
+  return `${label}${value.padStart(Math.max(0, WIDTH - label.length))}`.slice(0, WIDTH);
+}
+
+/** Build the printable ESC/POS-style text receipt. */
 export function generateReceiptText(
   items: ReceiptItem[],
   subtotal: number,
   discountPercent: number,
   total: number,
-  paymentMethod: string
+  paymentMethod = "Cash",
+  options: ReceiptOptions = {}
 ): string {
-  const dateStr = new Date().toLocaleString();
+  const date = options.date ?? new Date();
+  const transactionId = options.transactionId ?? 0;
   const discountAmount = subtotal * (discountPercent / 100);
-  
-  let receipt = "";
-  receipt += "================================================\n";
-  receipt += "               RETRO CAFE POS                   \n";
-  receipt += "          Terminal Point of Sale                \n";
-  receipt += "================================================\n";
-  receipt += `Date: ${dateStr}\n`;
-  receipt += "------------------------------------------------\n";
-  receipt += "ITEM                 QTY     PRICE       TOTAL  \n";
-  receipt += "------------------------------------------------\n";
+  const rows: string[] = [];
 
-  items.forEach((item) => {
-    const lineTotal = (item.price * item.qty).toFixed(2);
-    const nameFormatted = item.name.padEnd(18, " ").substring(0, 18);
-    const qtyFormatted = String(item.qty).padEnd(6, " ");
-    const priceFormatted = `$${item.price.toFixed(2)}`.padEnd(10, " ");
-    const totalFormatted = `$${lineTotal}`.padStart(8, " ");
-    receipt += `${nameFormatted}${qtyFormatted}${priceFormatted}${totalFormatted}\n`;
-  });
+  rows.push(line("="));
+  rows.push(center("RETRO CAFE POS"));
+  rows.push(center("TERMINAL POINT OF SALE"));
+  rows.push(line("="));
+  rows.push(`Receipt #${String(transactionId).padStart(6, "0")}`);
+  rows.push(date.toLocaleString());
+  rows.push(line("-"));
+  rows.push(
+    `${"ITEM".padEnd(18)}${"QTY".padStart(4)}${"PRICE".padStart(9)}${"TOTAL".padStart(11)}`
+  );
+  rows.push(line("-"));
 
-  receipt += "------------------------------------------------\n";
-  receipt += `SUBTOTAL:                           $${subtotal.toFixed(2)}\n`;
-  if (discountPercent > 0) {
-    receipt += `DISCOUNT (${discountPercent}%):                       -$${discountAmount.toFixed(2)}\n`;
+  for (const item of items) {
+    const name = item.name.padEnd(18).slice(0, 18);
+    const qty = String(item.qty).padStart(4);
+    const price = money(item.price).padStart(9);
+    const totalForItem = money(item.price * item.qty).padStart(11);
+    rows.push(`${name}${qty}${price}${totalForItem}`);
   }
-  receipt += `NET TOTAL:                          $${total.toFixed(2)}\n`;
-  receipt += `PAYMENT METHOD:                     ${paymentMethod}\n`;
-  receipt += "================================================\n";
-  receipt += "          ║█║▌║█║▌│║▌║▌█║                     \n";
-  receipt += "          TXN-890123984019                      \n";
-  receipt += "      THANK YOU FOR YOUR VISIT!                 \n";
-  receipt += "================================================\n";
 
-  return receipt;
+  rows.push(line("-"));
+  rows.push(twoColumn("SUBTOTAL", money(subtotal)));
+  if (discountPercent > 0) {
+    rows.push(twoColumn(`DISCOUNT ${discountPercent}%`, `-${money(discountAmount)}`));
+  }
+  rows.push(twoColumn("TOTAL", money(total)));
+  rows.push(twoColumn("PAYMENT", paymentMethod.toUpperCase()));
+  rows.push(line("="));
+  rows.push(center("||| ||| || ||| ||| || ||| ||"));
+  rows.push(center(`TXN-${String(transactionId).padStart(10, "0")}`));
+  rows.push(center("THANK YOU FOR YOUR VISIT"));
+  rows.push(line("="));
+
+  return rows.join("\n");
+}
+
+/**
+ * Append one receipt to receipts.log. This is intentionally append-only: no
+ * completed sale should ever overwrite an earlier receipt.
+ */
+export function appendReceiptToLog(receipt: string, path = DEFAULT_RECEIPT_LOG): string {
+  const entry = `${receipt.trimEnd()}\n\n`;
+  appendFileSync(path, entry, "utf8");
+  return path;
+}
+
+/** Split a receipt into display lines for the in-app receipt viewer. */
+export function receiptLines(receipt: string): string[] {
+  return receipt.trimEnd().split("\n");
 }

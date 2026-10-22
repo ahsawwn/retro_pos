@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "start": "bun run src/index.tsx",
     "typecheck": "bun check"
   },
   "dependencies": {
