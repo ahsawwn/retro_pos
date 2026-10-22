@@ -39,6 +39,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.db-shm
 *.db-wal
 receipts.log
+receipts.escpos.log
 
 # Local agent workspace
 .opencode/
