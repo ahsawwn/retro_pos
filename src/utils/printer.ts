@@ -197,6 +197,19 @@ export function printReceipt(receipt: string, configuredDevice = ""): PrintResul
     appendFileSync(detected.device, generateEscPosReceipt(receipt), "utf8");
     return { ok: true, device: detected.device };
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") {
+      return {
+        ok: false,
+        device: detected.device,
+        error:
+          `Permission denied writing to ${detected.device}. ` +
+          `Add your user to the "lp" group: sudo usermod -aG lp $USER (then log out and back in).`,
+      };
+    }
+    if (code === "EBUSY") {
+      return { ok: false, device: detected.device, error: `${detected.device} is busy (held by another print job).` };
+    }
     return {
       ok: false,
       device: detected.device,
