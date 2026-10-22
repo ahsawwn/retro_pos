@@ -91,6 +91,7 @@ Analytics reports today, this week, and all-time revenue and transaction counts,
 ## Settings
 
 - **Store profile** changes name, address, Cafe/Retail mode, currency symbol, and tax rate immediately.
+- **Receipt printer** chooses Auto print / Ask / Off, sets the device path, and sends a test receipt.
 - **Keyboard shortcuts** remaps every action. Capture a key, or use `Backspace` to restore that action's default.
 - **User accounts** manages Admins, Managers, and Cashiers, including PIN resets.
 - **Import / export** writes `products_export.csv` and imports products from CSV or JSON by upserting on barcode.
@@ -101,6 +102,20 @@ Settings and the selected theme are stored in SQLite, so both survive restarts. 
 ## Receipts
 
 Receipts use a 42-column, 80mm-friendly layout with centered store details, transaction number, cashier, timestamp, item grid, subtotal, discount, tax, net total, payment/change, and an ASCII barcode.
+
+### Printing after checkout
+
+Configure this in **Settings → Receipt printer**:
+
+| Mode | Behavior |
+| --- | --- |
+| `Auto print` | Sends the receipt to the printer immediately after checkout. |
+| `Ask after checkout` | Keeps the receipt on screen and prints only when you press `P`. |
+| `Off` | Never sends to a printer; keeps receipts on screen and in the logs. |
+
+The app auto-detects common device paths (`/dev/usb/lp0`, `/dev/lp0`, `/dev/ttyUSB0`, `COM1`). You can override the device in the same screen or with the `RETRO_POS_PRINTER` environment variable, and press `T` to send a test receipt. Printing never blocks a sale: if the printer is missing or a write fails, the receipt stays on screen with the ESC/POS copy in `receipts.escpos.log`.
+
+You can also print any receipt later from Sales History with `P`.
 
 Every sale is appended to:
 
@@ -117,6 +132,7 @@ Every sale is appended to:
 | `Enter` | Add the selected match |
 | `Esc` | Leave search / cancel the current form |
 | `Ctrl+U` | Clear the search query or current import path |
+| `P` | Print the open receipt (receipt viewer and Sales History) |
 | `Q` | Quit from nav mode; `Ctrl+C` always quits |
 
 Single-letter hotkeys are disabled while the search bar or a form has focus, so scanners and typing never trigger actions by accident. Function-key shortcuts such as `F8` still work while searching.
